@@ -1,0 +1,373 @@
+"""Episode → entities/edges extraction pipeline.
+
+1. Load ontology snapshot.
+2. Run structured-output LLM to extract entities + facts grounded in the ontology.
+3. Resolve each extracted entity to an existing one (alias + similarity) or create a new one.
+4. For each fact, resolve subject + object, validate domain/range, and add the edge.
+5. When workspace.settings.ontology_mode is "flexible" or "auto", allow the extractor to
+   introduce new entity/relation types on the fly.
+
+Runs as an Arq job. Episode rows carry ``processing_status`` so the UI
+can show progress.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.logging import get_logger
+from app.domain import edge as edge_mod
+from app.domain import entity as entity_mod
+from app.domain import ontology as ontology_mod
+from app.llm.embedding import get_embedding_client
+from app.llm.provider import get_llm
+from app.llm.vector_utils import to_pg_vector
+
+log = get_logger(__name__)
+
+
+class ExtractedEntity(BaseModel):
+    local_id: str = Field(..., description="A label unique within this extraction (e.g. 'alice', 'acme').")
+    name: str = Field(..., description="Canonical name.")
+    type_slug: str = Field(..., description="Existing or newly-proposed entity type slug.")
+    aliases: list[str] = Field(default_factory=list)
+    summary: str | None = Field(default=None)
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtractedEdge(BaseModel):
+    subject_local_id: str
+    predicate_slug: str
+    object_local_id: str
+    fact: str = Field(..., max_length=300)
+    valid_from: str | None = Field(default=None, description="ISO-8601 date or date-time.")
+    valid_to: str | None = Field(default=None, description="ISO-8601, inclusive of end.")
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class Extraction(BaseModel):
+    entities: list[ExtractedEntity] = Field(default_factory=list)
+    edges: list[ExtractedEdge] = Field(default_factory=list)
+
+
+SYSTEM_PROMPT = """You extract entities and factual relationships from the text given.
+
+Rules:
+- Use `local_id` labels to connect the same entity across facts — keep them short and lowercase.
+- Prefer existing entity and relation types (provided below). Only introduce new slugs if the existing ontology truly cannot express the content.
+- Facts must be grounded in the text. Do NOT invent relationships.
+- Parse dates into ISO-8601 when present; leave `valid_from` null if not stated.
+- Keep `fact` short and natural-language, e.g. "Alice works at Acme"."""
+
+
+@dataclass
+class ExtractionResult:
+    episode_id: str
+    created_entities: list[str] = field(default_factory=list)
+    resolved_entities: list[str] = field(default_factory=list)
+    created_edges: list[str] = field(default_factory=list)
+    ontology_extended_types: list[str] = field(default_factory=list)
+    ontology_extended_relations: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+async def process_episode(
+    session: AsyncSession,
+    *,
+    episode_id: str,
+    actor_id: str | None = None,
+) -> ExtractionResult:
+    result = ExtractionResult(episode_id=episode_id)
+
+    episode = await _load_episode(session, episode_id)
+    if not episode:
+        result.errors.append("episode not found")
+        return result
+
+    workspace_id = episode["workspace_id"]
+    await _mark_status(session, episode_id, "processing")
+
+    settings_row = await session.execute(
+        text("SELECT settings FROM workspace WHERE id = :id"),
+        {"id": workspace_id},
+    )
+    ws_settings = settings_row.scalar_one()
+    ontology_mode = (ws_settings or {}).get("ontology_mode", "strict")
+
+    # Ensure we have an embedding for the episode text, so retrieval can find it later.
+    if episode["content_text"] and not episode["has_embedding"]:
+        try:
+            vec = await get_embedding_client().embed_one(episode["content_text"])
+            await session.execute(
+                text(
+                    """
+                    UPDATE episode SET content_embedding = CAST(:embedding AS vector)
+                    WHERE id = :id
+                    """
+                ),
+                {"id": episode_id, "embedding": to_pg_vector(vec)},
+            )
+        except Exception as exc:
+            log.warning("extraction.embedding_failed", episode_id=episode_id, error=str(exc))
+
+    snapshot = await ontology_mod.snapshot(session)
+
+    try:
+        extracted = await _run_llm(
+            snapshot=snapshot,
+            text_=episode["content_text"] or "",
+        )
+    except Exception as exc:
+        await _mark_status(session, episode_id, "failed", error=str(exc))
+        result.errors.append(f"llm: {exc}")
+        return result
+
+    # Step 1: ensure all referenced types exist (respecting mode).
+    type_slugs = {e.type_slug for e in extracted.entities}
+    relation_slugs = {e.predicate_slug for e in extracted.edges}
+
+    if ontology_mode in ("flexible", "auto"):
+        await _extend_ontology(
+            session,
+            workspace_id=workspace_id,
+            snapshot=snapshot,
+            type_slugs=type_slugs,
+            relation_slugs=relation_slugs,
+            result=result,
+            actor_id=actor_id,
+        )
+        # Refresh snapshot after creating types.
+        snapshot = await ontology_mod.snapshot(session)
+
+    # Step 2: resolve/create entities.
+    local_to_entity: dict[str, str] = {}
+    for e in extracted.entities:
+        type_def = snapshot.type_by_slug(e.type_slug)
+        if not type_def:
+            result.errors.append(f"unknown type: {e.type_slug}")
+            continue
+
+        existing = await entity_mod.resolve_by_alias(
+            session,
+            workspace_id=workspace_id,
+            name=e.name,
+            type_ref=e.type_slug,
+            similarity_threshold=0.6,
+            limit=1,
+        )
+        if existing:
+            local_to_entity[e.local_id] = existing[0].id
+            result.resolved_entities.append(existing[0].id)
+            # Extend aliases if new ones are found.
+            current_aliases = set(existing[0].aliases)
+            new_aliases = [a for a in e.aliases if a not in current_aliases and a != existing[0].canonical]
+            if new_aliases:
+                await session.execute(
+                    text(
+                        """
+                        UPDATE entity SET aliases = (
+                          SELECT array_agg(DISTINCT x) FROM unnest(aliases || :new) x
+                        )
+                        WHERE id = :id
+                        """
+                    ),
+                    {"id": existing[0].id, "new": new_aliases},
+                )
+            continue
+
+        # Create new entity.
+        try:
+            created = await entity_mod.create(
+                session,
+                workspace_id=workspace_id,
+                type_ref=e.type_slug,
+                canonical=e.name,
+                aliases=list(e.aliases),
+                summary=e.summary,
+                props=e.properties,
+                created_by=actor_id,
+            )
+            local_to_entity[e.local_id] = created.id
+            result.created_entities.append(created.id)
+        except Exception as exc:
+            result.errors.append(f"entity {e.name}: {exc}")
+
+    # Step 3: create edges.
+    for ex in extracted.edges:
+        subj = local_to_entity.get(ex.subject_local_id)
+        obj = local_to_entity.get(ex.object_local_id)
+        if not subj or not obj:
+            result.errors.append(f"edge missing endpoint: {ex.fact}")
+            continue
+        relation = snapshot.relation_by_slug(ex.predicate_slug)
+        if not relation:
+            result.errors.append(f"unknown relation: {ex.predicate_slug}")
+            continue
+        try:
+            valid_from_dt = _parse_iso(ex.valid_from) if ex.valid_from else None
+            valid_to_dt = _parse_iso(ex.valid_to) if ex.valid_to else None
+            new_edge = await edge_mod.add_fact(
+                session,
+                workspace_id=workspace_id,
+                subject_id=subj,
+                predicate=relation.id,
+                object_id=obj,
+                fact=ex.fact,
+                valid_from=valid_from_dt,
+                valid_to=valid_to_dt,
+                source_id=episode_id,
+                source_kind="episode",
+                confidence=ex.confidence,
+                created_by=actor_id,
+            )
+            result.created_edges.append(new_edge.id)
+        except Exception as exc:
+            result.errors.append(f"edge {ex.fact}: {exc}")
+
+    status: Literal["completed", "failed"] = "completed" if not result.errors or result.created_edges or result.created_entities else "failed"
+    await _mark_status(session, episode_id, status, error="\n".join(result.errors) if result.errors else None)
+
+    log.info(
+        "extraction.episode.done",
+        episode_id=episode_id,
+        created_entities=len(result.created_entities),
+        resolved=len(result.resolved_entities),
+        created_edges=len(result.created_edges),
+        errors=len(result.errors),
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# LLM call
+# ---------------------------------------------------------------------------
+
+async def _run_llm(*, snapshot: ontology_mod.OntologySnapshot, text_: str) -> Extraction:
+    existing_types = "\n".join(
+        f"- {t.slug}"
+        + (f" (extends {next((x.slug for x in snapshot.types if x.id == t.extends_id), 'thing')})"
+           if t.extends_id else "")
+        + (f" — {t.description}" if t.description else "")
+        for t in snapshot.types
+    ) or "(none)"
+    existing_rels = "\n".join(
+        f"- {r.slug}: {_slug_by_id(snapshot, r.domain_type_id) or 'thing'} → {_slug_by_id(snapshot, r.range_type_id) or 'thing'}"
+        for r in snapshot.relations
+    ) or "(none)"
+
+    user_prompt = (
+        "Available entity types:\n"
+        f"{existing_types}\n\n"
+        "Available relation types:\n"
+        f"{existing_rels}\n\n"
+        "Text to extract from:\n---\n"
+        f"{text_}\n---"
+    )
+    llm = get_llm()
+    return await llm.structured(
+        schema=Extraction, system=SYSTEM_PROMPT, user=user_prompt,
+        temperature=0.1, max_tokens=4000,
+    )
+
+
+async def _extend_ontology(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    snapshot: ontology_mod.OntologySnapshot,
+    type_slugs: set[str],
+    relation_slugs: set[str],
+    result: ExtractionResult,
+    actor_id: str | None,
+) -> None:
+    existing_type_slugs = {t.slug for t in snapshot.types}
+    existing_relation_slugs = {r.slug for r in snapshot.relations}
+
+    for slug in type_slugs - existing_type_slugs:
+        try:
+            created = await ontology_mod.create_entity_type(
+                session,
+                workspace_id=workspace_id,
+                name=_humanize(slug),
+                slug=slug,
+                extends="thing",
+                description="Auto-discovered during extraction.",
+                ui_hints={"proposed_by": actor_id or "extractor"},
+            )
+            result.ontology_extended_types.append(created.slug)
+        except Exception as exc:
+            result.errors.append(f"auto-type {slug}: {exc}")
+
+    for slug in relation_slugs - existing_relation_slugs:
+        try:
+            created = await ontology_mod.create_relation_type(
+                session,
+                workspace_id=workspace_id,
+                name=_humanize(slug),
+                slug=slug,
+                description="Auto-discovered during extraction.",
+                domain="thing",
+                range_="thing",
+                ui_hints={"proposed_by": actor_id or "extractor"},
+            )
+            result.ontology_extended_relations.append(created.slug)
+        except Exception as exc:
+            result.errors.append(f"auto-relation {slug}: {exc}")
+
+
+def _slug_by_id(snapshot: ontology_mod.OntologySnapshot, type_id: str | None) -> str | None:
+    if not type_id:
+        return None
+    t = snapshot.type_by_id(type_id)
+    return t.slug if t else None
+
+
+def _humanize(slug: str) -> str:
+    return slug.replace("_", " ").title()
+
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+async def _load_episode(session: AsyncSession, episode_id: str) -> dict[str, Any] | None:
+    result = await session.execute(
+        text(
+            """
+            SELECT id::text, workspace_id::text, source_kind, occurred_at::text,
+                   content, content_text,
+                   (content_embedding IS NOT NULL) AS has_embedding
+            FROM episode WHERE id = :id
+            """
+        ),
+        {"id": episode_id},
+    )
+    row = result.mappings().first()
+    return dict(row) if row else None
+
+
+async def _mark_status(
+    session: AsyncSession,
+    episode_id: str,
+    status: str,
+    error: str | None = None,
+) -> None:
+    await session.execute(
+        text(
+            """
+            UPDATE episode
+            SET processing_status = :status,
+                processing_error = :error
+            WHERE id = :id
+            """
+        ),
+        {"id": episode_id, "status": status, "error": error},
+    )

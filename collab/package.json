@@ -1,0 +1,30 @@
+{
+  "name": "memory-collab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hocuspocus/server": "^2.14.0",
+    "@hocuspocus/extension-database": "^2.14.0",
+    "@hocuspocus/extension-logger": "^2.14.0",
+    "@blocknote/core": "^0.22.0",
+    "@blocknote/server-util": "^0.22.0",
+    "yjs": "^13.6.20",
+    "y-prosemirror": "^1.2.14",
+    "pg": "^8.13.0",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "@types/jsonwebtoken": "^9.0.7"
+  }
+}

@@ -1,0 +1,264 @@
+# Dynamiq Context Engine — Render.com blueprint
+#
+# Architecture deployed by this blueprint:
+#   databases/dynamiq-postgres — managed PG17
+#   services/dynamiq-redis     — managed Key-Value (Redis)
+#   services/dynamiq-backend   — FastAPI web (Docker, runner target)
+#   services/dynamiq-worker    — arq background worker (Docker, runner target)
+#   services/dynamiq-hocuspocus— Hocuspocus WS (Docker, runner target)
+#   services/dynamiq-web       — Next.js (Docker, runner target)
+#
+# ─────────────────────────────────────────────────────────────────────────
+# BEFORE FIRST DEPLOY — fill these in the Render dashboard. NEXT_PUBLIC_*
+# vars are baked into the web bundle at BUILD time, so they must be set
+# before the first web build is triggered. Render names follow the
+# `<service>-<hash>.onrender.com` pattern — you can preview URLs in the
+# dashboard by clicking through to each service without deploying yet.
+#
+# On the "dynamiq-secrets" env-var group (manual entry):
+#   JWT_SECRET          openssl rand -hex 32
+#   BETTER_AUTH_SECRET  openssl rand -hex 32
+#
+# On the "dynamiq-urls" env-var group (manual entry, use the Render URLs):
+#   PUBLIC_BASE_URL                https://dynamiq-backend-XXXX.onrender.com
+#   CORS_ORIGINS                   https://dynamiq-web-XXXX.onrender.com
+#   BETTER_AUTH_URL                https://dynamiq-web-XXXX.onrender.com
+#   NEXT_PUBLIC_BETTER_AUTH_URL    same as BETTER_AUTH_URL
+#   NEXT_PUBLIC_API_URL            same as PUBLIC_BASE_URL
+#   NEXT_PUBLIC_COLLAB_URL         wss://dynamiq-hocuspocus-XXXX.onrender.com
+#   NEXT_PUBLIC_SITE_URL           https://dynamiq-web-XXXX.onrender.com
+#
+# On the "dynamiq-integrations" env-var group:
+#   ANTHROPIC_API_KEY, OPENAI_API_KEY
+#   S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION
+#   RESEND_API_KEY    (for transactional email: verify + password reset)
+#   SENTRY_DSN        (optional; skip to disable error tracking)
+#
+# See DEPLOY.md for step-by-step walkthrough.
+# ─────────────────────────────────────────────────────────────────────────
+
+databases:
+  - name: dynamiq-postgres
+    plan: starter
+    postgresMajorVersion: "17"
+    ipAllowList: []  # private by default — only internal services connect
+
+services:
+  # ---------------------------------------------------------------------
+  # Redis (managed Key-Value)
+  # ---------------------------------------------------------------------
+  - type: keyvalue
+    name: dynamiq-redis
+    plan: starter
+    ipAllowList: []
+
+  # ---------------------------------------------------------------------
+  # FastAPI backend
+  # ---------------------------------------------------------------------
+  - type: web
+    name: dynamiq-backend
+    runtime: docker
+    plan: starter
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    # Run migrations once per deploy, before swapping traffic to new instances.
+    # This avoids the classic N-instance migration race on scale-up.
+    preDeployCommand: alembic upgrade head
+    envVars:
+      - fromGroup: dynamiq-secrets
+      - fromGroup: dynamiq-urls
+      - fromGroup: dynamiq-integrations
+      - key: POSTGRES_URL
+        fromDatabase:
+          name: dynamiq-postgres
+          property: connectionString
+      - key: POSTGRES_SYNC_URL
+        fromDatabase:
+          name: dynamiq-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: dynamiq-redis
+          property: connectionString
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_ISSUER
+        value: dynamiq-context-engine
+      - key: LOG_LEVEL
+        value: INFO
+      - key: LLM_PROVIDER
+        value: anthropic
+      - key: LLM_MODEL
+        value: claude-sonnet-4-6
+      - key: EMBEDDING_PROVIDER
+        value: openai
+      - key: EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: EMBEDDING_DIM
+        value: "1536"
+      - key: CONTRADICTOR_SIMILARITY_THRESHOLD
+        value: "0.85"
+      - key: HYBRID_RRF_K
+        value: "60"
+      - key: SEARCH_DEFAULT_LIMIT
+        value: "20"
+      - key: COLLAB_INTERNAL_URL
+        sync: false                # = https://dynamiq-hocuspocus-XXXX.onrender.com
+
+  # ---------------------------------------------------------------------
+  # arq background worker
+  # ---------------------------------------------------------------------
+  - type: worker
+    name: dynamiq-worker
+    runtime: docker
+    plan: starter
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    dockerCommand: arq app.workers.jobs.WorkerSettings
+    autoDeploy: true
+    envVars:
+      - fromGroup: dynamiq-secrets
+      - fromGroup: dynamiq-urls
+      - fromGroup: dynamiq-integrations
+      - key: POSTGRES_URL
+        fromDatabase:
+          name: dynamiq-postgres
+          property: connectionString
+      - key: POSTGRES_SYNC_URL
+        fromDatabase:
+          name: dynamiq-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: dynamiq-redis
+          property: connectionString
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_ISSUER
+        value: dynamiq-context-engine
+      - key: LLM_PROVIDER
+        value: anthropic
+      - key: LLM_MODEL
+        value: claude-sonnet-4-6
+      - key: EMBEDDING_PROVIDER
+        value: openai
+      - key: EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: EMBEDDING_DIM
+        value: "1536"
+      - key: LOG_LEVEL
+        value: INFO
+
+  # ---------------------------------------------------------------------
+  # Hocuspocus collab (Yjs WebSocket server)
+  # ---------------------------------------------------------------------
+  - type: web
+    name: dynamiq-hocuspocus
+    runtime: docker
+    plan: starter
+    dockerContext: ./collab
+    dockerfilePath: ./collab/Dockerfile
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - fromGroup: dynamiq-secrets
+      - fromGroup: dynamiq-urls
+      - key: POSTGRES_URL
+        fromDatabase:
+          name: dynamiq-postgres
+          property: connectionString
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_ISSUER
+        value: dynamiq-context-engine
+      - key: COLLAB_PORT
+        value: "1234"
+
+  # ---------------------------------------------------------------------
+  # Next.js web client
+  # ---------------------------------------------------------------------
+  - type: web
+    name: dynamiq-web
+    runtime: docker
+    plan: starter
+    dockerContext: ./web
+    dockerfilePath: ./web/Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - fromGroup: dynamiq-secrets
+      - fromGroup: dynamiq-urls
+      - fromGroup: dynamiq-integrations
+      - key: POSTGRES_URL
+        fromDatabase:
+          name: dynamiq-postgres
+          property: connectionString
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_ISSUER
+        value: dynamiq-context-engine
+
+# ---------------------------------------------------------------------
+# Env var groups — single source of truth for cross-service config.
+# Setting a secret once here means backend, web, worker, collab all
+# read the same value; no drift.
+# ---------------------------------------------------------------------
+envVarGroups:
+  - name: dynamiq-secrets
+    envVars:
+      - key: JWT_SECRET
+        sync: false                # openssl rand -hex 32 → dashboard
+      - key: BETTER_AUTH_SECRET
+        sync: false                # openssl rand -hex 32 → dashboard
+      - key: HYDRATE_SECRET
+        sync: false                # openssl rand -hex 32 → dashboard
+                                   # Used by demo seeder ↔ Hocuspocus
+
+  - name: dynamiq-urls
+    envVars:
+      # Backend-facing URLs
+      - key: PUBLIC_BASE_URL
+        sync: false                # https://dynamiq-backend-XXXX.onrender.com
+      - key: CORS_ORIGINS
+        sync: false                # https://dynamiq-web-XXXX.onrender.com
+
+      # BetterAuth (session cookies)
+      - key: BETTER_AUTH_URL
+        sync: false                # https://dynamiq-web-XXXX.onrender.com
+
+      # NEXT_PUBLIC_* — baked into the web bundle at build time.
+      # The web Dockerfile accepts these as ARGs; Render's build system
+      # forwards env vars into Docker build args automatically.
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
+      - key: NEXT_PUBLIC_COLLAB_URL
+        sync: false
+      - key: NEXT_PUBLIC_BETTER_AUTH_URL
+        sync: false
+      - key: NEXT_PUBLIC_SITE_URL
+        sync: false
+
+  - name: dynamiq-integrations
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_ACCESS_KEY
+        sync: false
+      - key: S3_SECRET_KEY
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        value: us-east-1
+      - key: RESEND_API_KEY
+        sync: false                # for email verification + password reset
+      - key: SENTRY_DSN
+        sync: false                # optional; leave empty to disable

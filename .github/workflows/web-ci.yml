@@ -1,0 +1,64 @@
+name: Web CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/web-ci.yml"
+  pull_request:
+    paths:
+      - "web/**"
+      - ".github/workflows/web-ci.yml"
+
+concurrency:
+  group: web-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint · typecheck · test · build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint --max-warnings 0
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        env:
+          # Build-time env stubs so Next doesn't choke on missing runtime env.
+          # Real values come from secrets at deploy time.
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+          NEXT_PUBLIC_COLLAB_URL: ws://localhost:1234
+          NEXT_PUBLIC_BETTER_AUTH_URL: http://localhost:3000
+          BETTER_AUTH_URL: http://localhost:3000
+          BETTER_AUTH_SECRET: ci-dummy-secret-do-not-use-in-prod
+          JWT_SECRET: ci-dummy-secret-do-not-use-in-prod
+          POSTGRES_URL: postgresql://stub
+        run: pnpm build

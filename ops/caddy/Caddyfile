@@ -1,0 +1,24 @@
+{
+    auto_https off
+    admin off
+}
+
+:80 {
+    # API + MCP
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+    handle /mcp* {
+        reverse_proxy backend:8000
+    }
+
+    # Yjs collab websocket
+    handle /collab* {
+        reverse_proxy hocuspocus:1234
+    }
+
+    # Everything else → Next.js
+    handle {
+        reverse_proxy web:3000
+    }
+}

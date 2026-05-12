@@ -1,0 +1,344 @@
+# Built-in ontology applied to every new workspace.
+# system: true means the type/relation is platform-owned and can't be deleted.
+# ui_hints.abstract: true hides a type from entity-creation pickers; it still
+# participates in subtype / domain / range checks via ltree hierarchy.
+
+types:
+  - slug: thing
+    name: Thing
+    extends: null
+    system: true
+    ui_hints:
+      abstract: true
+      icon: circle
+    description: Root of the ontology. Everything is a Thing.
+    schema:
+      type: object
+      properties: {}
+      additionalProperties: true
+
+  - slug: agent
+    name: Agent
+    extends: thing
+    system: true
+    ui_hints:
+      abstract: true
+      icon: users
+    description: Something that can act or be acted on (person, organization, bot).
+
+  - slug: work
+    name: Work
+    extends: thing
+    system: true
+    ui_hints:
+      abstract: true
+      icon: briefcase
+
+  - slug: content
+    name: Content
+    extends: thing
+    system: true
+    ui_hints:
+      abstract: true
+      icon: file-text
+
+  - slug: concept
+    name: Concept
+    extends: thing
+    system: true
+    ui_hints:
+      abstract: true
+      icon: tag
+
+  - slug: person
+    name: Person
+    extends: agent
+    system: true
+    ui_hints:
+      icon: user
+      color: "#3b82f6"
+    schema:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          title: Email
+        title:
+          type: string
+          title: Title
+        bio:
+          type: string
+          title: Bio
+      additionalProperties: true
+
+  - slug: organization
+    name: Organization
+    extends: agent
+    system: true
+    ui_hints:
+      icon: building
+      color: "#8b5cf6"
+    schema:
+      type: object
+      properties:
+        website:
+          type: string
+          format: uri
+          title: Website
+        industry:
+          type: string
+          title: Industry
+      additionalProperties: true
+
+  - slug: project
+    name: Project
+    extends: work
+    system: true
+    ui_hints:
+      icon: folder-kanban
+      color: "#10b981"
+    schema:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [planning, active, on_hold, completed, archived]
+          title: Status
+        start_date:
+          type: string
+          format: date
+          title: Start date
+        end_date:
+          type: string
+          format: date
+          title: End date
+      additionalProperties: true
+
+  - slug: task
+    name: Task
+    extends: work
+    system: true
+    ui_hints:
+      icon: check-square
+      color: "#f59e0b"
+    schema:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [todo, in_progress, blocked, done, cancelled]
+          title: Status
+        priority:
+          type: string
+          enum: [low, medium, high, urgent]
+          title: Priority
+        due_date:
+          type: string
+          format: date-time
+          title: Due
+      additionalProperties: true
+
+  - slug: meeting
+    name: Meeting
+    extends: work
+    system: true
+    ui_hints:
+      icon: calendar
+      color: "#ef4444"
+    schema:
+      type: object
+      properties:
+        starts_at:
+          type: string
+          format: date-time
+          title: Starts at
+        ends_at:
+          type: string
+          format: date-time
+          title: Ends at
+        location:
+          type: string
+          title: Location
+      additionalProperties: true
+
+  - slug: document
+    name: Document
+    extends: content
+    system: true
+    ui_hints:
+      icon: file
+      color: "#64748b"
+    schema:
+      type: object
+      properties:
+        source_url:
+          type: string
+          format: uri
+          title: Source URL
+      additionalProperties: true
+
+  - slug: note
+    name: Note
+    extends: content
+    system: true
+    ui_hints:
+      icon: sticky-note
+      color: "#eab308"
+    schema:
+      type: object
+      properties: {}
+      additionalProperties: true
+
+  - slug: topic
+    name: Topic
+    extends: concept
+    system: true
+    ui_hints:
+      icon: hash
+      color: "#06b6d4"
+    schema:
+      type: object
+      properties:
+        description:
+          type: string
+          title: Description
+      additionalProperties: true
+
+relations:
+  - slug: works_at
+    name: Works at
+    description: Subject is employed by or contracts with the object organization.
+    domain: person
+    range: organization
+    cardinality_subject: many
+    cardinality_object: one
+    temporal: true
+    high_stakes: true
+    inverse_of: null
+    system: true
+
+  - slug: member_of
+    name: Member of
+    description: Subject is a member of the object organization or project.
+    domain: agent
+    range: agent
+    cardinality_subject: many
+    cardinality_object: many
+    temporal: true
+    system: true
+
+  - slug: manages
+    name: Manages
+    description: Subject has managerial responsibility for the object.
+    domain: person
+    range: agent
+    cardinality_subject: many
+    cardinality_object: one
+    temporal: true
+    high_stakes: true
+    system: true
+
+  - slug: assigned_to
+    name: Assigned to
+    description: Task is assigned to a person.
+    domain: task
+    range: person
+    cardinality_subject: one
+    cardinality_object: many
+    temporal: true
+    high_stakes: true
+    system: true
+
+  - slug: part_of
+    name: Part of
+    description: Subject is a part of the object (e.g., sub-task of task, project under program).
+    domain: work
+    range: work
+    transitive: true
+    temporal: true
+    system: true
+
+  - slug: depends_on
+    name: Depends on
+    description: Subject depends on completion of the object.
+    domain: task
+    range: task
+    transitive: true
+    temporal: true
+    system: true
+
+  - slug: attended
+    name: Attended
+    description: Person attended a meeting.
+    domain: person
+    range: meeting
+    temporal: false
+    system: true
+
+  - slug: authored
+    name: Authored
+    description: Person is the author of a piece of content.
+    domain: person
+    range: content
+    cardinality_object: many
+    temporal: false
+    system: true
+
+  - slug: mentions
+    name: Mentions
+    description: Content mentions a thing.
+    domain: content
+    range: thing
+    temporal: false
+    system: true
+
+  - slug: references
+    name: References
+    description: Content formally references a thing (citation-grade).
+    domain: content
+    range: thing
+    temporal: false
+    system: true
+
+  - slug: tagged
+    name: Tagged
+    description: Thing is tagged with a topic.
+    domain: thing
+    range: topic
+    temporal: false
+    system: true
+
+  - slug: follows
+    name: Follows
+    description: Meeting is the successor of another meeting (series).
+    domain: meeting
+    range: meeting
+    temporal: false
+    system: true
+
+  - slug: related_to
+    name: Related to
+    description: Generic symmetric relation between any two things.
+    domain: thing
+    range: thing
+    symmetric: true
+    temporal: false
+    system: true
+
+  - slug: knows
+    name: Knows
+    description: Person knows another person (symmetric).
+    domain: person
+    range: person
+    symmetric: true
+    temporal: false
+    system: true
+
+  - slug: located_at
+    name: Located at
+    description: Subject has a location at the object organization/site.
+    domain: agent
+    range: organization
+    temporal: true
+    system: true

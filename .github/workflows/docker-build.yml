@@ -1,0 +1,67 @@
+name: Docker build
+
+# Builds every service image on PRs and on main. Catches Dockerfile
+# breakage (bad syntax, missing dep, apt-package removal upstream) before
+# it hits Render. Does not push anywhere — Render builds its own images
+# from source when deploying.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "web/**"
+      - "collab/**"
+      - ".github/workflows/docker-build.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "web/**"
+      - "collab/**"
+      - ".github/workflows/docker-build.yml"
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build ${{ matrix.service }} image
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: backend
+            context: ./backend
+            # production runner target
+            target: runner
+          - service: web
+            context: ./web
+            target: runner
+            # NEXT_PUBLIC_* need to be present at build time or Next will
+            # bake `undefined`. Use dummy values here — the produced image
+            # is for CI verification only, never deployed.
+            build-args: |
+              NEXT_PUBLIC_API_URL=https://ci.invalid
+              NEXT_PUBLIC_COLLAB_URL=wss://ci.invalid
+              NEXT_PUBLIC_BETTER_AUTH_URL=https://ci.invalid
+              NEXT_PUBLIC_SITE_URL=https://ci.invalid
+          - service: collab
+            context: ./collab
+            target: runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          target: ${{ matrix.target }}
+          push: false
+          load: false
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          build-args: ${{ matrix.build-args }}

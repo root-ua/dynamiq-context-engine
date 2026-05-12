@@ -1,0 +1,17 @@
+node_modules
+.next
+.turbo
+.git
+.gitignore
+.github
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+README.md
+coverage
+playwright-report
+test-results
+*.log
+.DS_Store

@@ -1,0 +1,103 @@
+[project]
+name = "dynamiq-context-engine-backend"
+version = "0.1.0"
+description = "Dynamiq Context Engine — FastAPI backend, MCP server, bi-temporal graph, retrieval"
+requires-python = ">=3.12"
+readme = "README.md"
+
+dependencies = [
+  # Web
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic[email]>=2.9",
+  "pydantic-settings>=2.6",
+  "python-multipart>=0.0.19",
+
+  # DB
+  "asyncpg>=0.30",
+  "psycopg2-binary>=2.9",
+  "sqlalchemy[asyncio]>=2.0.35",
+  "alembic>=1.14",
+  "pgvector>=0.3.6",
+
+  # Auth
+  "pyjwt[crypto]>=2.10",
+  "argon2-cffi>=23.1",
+
+  # LLM / embeddings
+  "litellm>=1.53",
+  "tiktoken>=0.8",
+
+  # Jobs & cache
+  "arq>=0.26",
+  "redis>=5.2",
+
+  # Storage
+  "minio>=7.2",
+
+  # MCP
+  "mcp>=1.1",
+
+  # Utility
+  "httpx>=0.28",
+  "tenacity>=9.0",
+  "structlog>=24.4",
+  "orjson>=3.10",
+  "pyyaml>=6.0",
+  "jsonschema>=4.23",
+  "python-slugify>=8.0",
+
+  # Observability (optional — runtime no-op if SENTRY_DSN is unset).
+  "sentry-sdk[fastapi]>=2.18",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "testcontainers[postgres,redis]>=4.8",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "types-PyYAML",
+]
+shacl = [
+  "pyshacl>=0.27",
+  "rdflib>=7.1",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  "E501",   # line length (handled by formatter guidance, not hard-gated)
+  "E701",   # multiple statements on one line (`if x: y = z` is fine in simple patch builders)
+  "E702",   # multiple statements on one line with semicolons (fine in compact row-assembly code)
+  "B008",   # function call in default arg (FastAPI depends on `Query()` / `Depends()` in signatures)
+  "RUF012", # mutable class attributes must be ClassVar (Arq / misc configs rely on this pattern)
+  "SIM105", # use `contextlib.suppress` instead of try/except/pass — style-only, adds an import
+  "SIM102", # nested `if`s — sometimes clearer than a long combined condition
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Keep a single event loop across the suite so the module-level asyncpg
+# pool in `app.db.session` is never used across a closed loop.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]

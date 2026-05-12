@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+from dataclasses import asdict
+from datetime import datetime
+
+from fastapi import APIRouter, HTTPException, Query
+from sqlalchemy import text
+
+from app.api.rest.schemas import EdgeCreate, EdgeInvalidate, EdgeOut
+from app.auth.deps import CurrentPrincipal, DbSession
+from app.domain import edge as edge_mod
+from app.domain.edge import EdgeError
+from app.domain.ontology import OntologyError
+
+router = APIRouter(prefix="/edges", tags=["edges"])
+
+
+@router.get("/time-bounds")
+async def time_bounds(
+    principal: CurrentPrincipal, session: DbSession
+) -> dict[str, str | None]:
+    """Return the earliest + latest valid_time in the workspace's edges.
+
+    Used by the graph's time slider to pick its range endpoints without
+    having to paginate every edge. The RLS policy scopes the query to
+    the principal's workspace automatically.
+    """
+    if not principal.workspace_id:
+        raise HTTPException(400, "workspace required")
+    result = await session.execute(
+        text(
+            """
+            SELECT
+              MIN(lower(valid_time))::text AS min_valid_from,
+              MAX(COALESCE(upper(valid_time), now()))::text AS max_valid_from
+            FROM edge
+            """
+        ),
+    )
+    row = result.mappings().first()
+    return {
+        "min_valid_from": row["min_valid_from"] if row else None,
+        "max_valid_from": row["max_valid_from"] if row else None,
+    }
+
+
+@router.post("", status_code=201)
+async def create(
+    payload: EdgeCreate, principal: CurrentPrincipal, session: DbSession,
+) -> EdgeOut:
+    if not principal.workspace_id:
+        raise HTTPException(400, "workspace required")
+    try:
+        edge = await edge_mod.add_fact(
+            session,
+            workspace_id=principal.workspace_id,
+            subject_id=payload.subject_id,
+            predicate=payload.predicate,
+            object_id=payload.object_id,
+            fact=payload.fact,
+            props=payload.props,
+            valid_from=payload.valid_from,
+            valid_to=payload.valid_to,
+            source_id=payload.source_id,
+            source_kind=payload.source_kind,
+            confidence=payload.confidence,
+            created_by=principal.user_id,
+        )
+    except (OntologyError, EdgeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return EdgeOut(**asdict(edge))
+
+
+@router.get("/{edge_id}")
+async def get(edge_id: str, principal: CurrentPrincipal, session: DbSession) -> EdgeOut:
+    edge = await edge_mod.get(session, edge_id, principal=principal)
+    if not edge:
+        raise HTTPException(404, "edge not found")
+    return EdgeOut(**asdict(edge))
+
+
+@router.post("/{edge_id}/invalidate")
+async def invalidate(
+    edge_id: str,
+    payload: EdgeInvalidate,
+    principal: CurrentPrincipal,
+    session: DbSession,
+) -> EdgeOut:
+    try:
+        edge = await edge_mod.invalidate(
+            session,
+            edge_id=edge_id,
+            invalidated_at=payload.invalidated_at,
+            reason=payload.reason,
+            actor_kind="user",
+            actor_id=principal.user_id,
+        )
+    except EdgeError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return EdgeOut(**asdict(edge))
+
+
+@router.get("")
+async def list_live(
+    principal: CurrentPrincipal,
+    session: DbSession,
+    subject_id: str | None = Query(default=None),
+    object_id: str | None = Query(default=None),
+    predicate: str | None = Query(default=None),
+    as_of_valid: datetime | None = Query(default=None),
+    limit: int = Query(default=100, le=500),
+) -> list[EdgeOut]:
+    if as_of_valid:
+        items = await edge_mod.as_of(
+            session, valid_at=as_of_valid,
+            subject_id=subject_id, object_id=object_id, predicate=predicate,
+            limit=limit, principal=principal,
+        )
+    else:
+        items = await edge_mod.live_edges(
+            session, subject_id=subject_id, object_id=object_id,
+            predicate=predicate, limit=limit, principal=principal,
+        )
+    return [EdgeOut(**asdict(e)) for e in items]

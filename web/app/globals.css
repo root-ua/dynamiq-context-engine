@@ -1,0 +1,125 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --accent-brand: 238 70% 58%;
+    --accent-brand-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 88%;
+    --input: 240 5.9% 88%;
+    --ring: 238 70% 58%;
+    --radius: 0.375rem;
+  }
+
+  .dark {
+    /* Near-neutral charcoal — kept a whisper of 240° hue so it reads
+       "cool gray" not "brown", but saturation is pulled way down so
+       low-contrast surfaces stop looking blue-violet. */
+    --background: 240 4% 12%;
+    --foreground: 0 0% 96%;
+    --card: 240 3% 15%;
+    --card-foreground: 0 0% 96%;
+    --popover: 240 3% 16%;
+    --popover-foreground: 0 0% 96%;
+    --primary: 0 0% 96%;
+    --primary-foreground: 240 4% 12%;
+    --secondary: 240 3% 19%;
+    --secondary-foreground: 0 0% 96%;
+    --muted: 240 3% 17%;
+    --muted-foreground: 240 4% 74%;
+    --accent: 240 3% 22%;
+    --accent-foreground: 0 0% 98%;
+    --accent-brand: 238 85% 72%;
+    --accent-brand-foreground: 240 4% 12%;
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 4% 26%;
+    --input: 240 4% 26%;
+    --ring: 238 85% 72%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    font-family:
+      var(--font-geist-sans),
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      "Segoe UI",
+      Roboto,
+      "Helvetica Neue",
+      Arial,
+      sans-serif;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01", "ss03";
+  }
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family:
+      var(--font-geist-mono), ui-monospace, SFMono-Regular, "SF Mono", Consolas,
+      "Liberation Mono", Menlo, monospace;
+  }
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* BlockNote picks up our design tokens via its CSS custom properties.
+     Overriding them here lets the editor chrome (slash menu, format bar,
+     side drag handle, tooltips) flip with our light/dark theme. */
+  .bn-container {
+    --bn-colors-editor-background: hsl(var(--background));
+    --bn-colors-editor-text: hsl(var(--foreground));
+    --bn-colors-menu-background: hsl(var(--popover));
+    --bn-colors-menu-text: hsl(var(--popover-foreground));
+    --bn-colors-tooltip-background: hsl(var(--popover));
+    --bn-colors-tooltip-text: hsl(var(--popover-foreground));
+    --bn-colors-hovered-background: hsl(var(--accent));
+    --bn-colors-hovered-text: hsl(var(--accent-foreground));
+    --bn-colors-selected-background: hsl(var(--accent));
+    --bn-colors-selected-text: hsl(var(--accent-foreground));
+    --bn-colors-disabled-background: hsl(var(--muted));
+    --bn-colors-disabled-text: hsl(var(--muted-foreground));
+    --bn-colors-border: hsl(var(--border));
+    --bn-colors-side-menu: hsl(var(--muted-foreground));
+    --bn-font-family:
+      var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  .bn-container h1 {
+    @apply mb-2 mt-6 text-2xl font-semibold tracking-tight;
+  }
+  .bn-container h2 {
+    @apply mb-1.5 mt-5 text-xl font-semibold tracking-tight;
+  }
+  .bn-container h3 {
+    @apply mb-1 mt-4 text-lg font-semibold tracking-tight;
+  }
+}

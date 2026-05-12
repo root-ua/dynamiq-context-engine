@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+
+# Abort fast if nothing in web/ is staged — backend-only commits should
+# not pay the node startup cost.
+STAGED_WEB=$(git diff --cached --name-only --diff-filter=ACMR | grep -E "^web/" || true)
+if [ -z "$STAGED_WEB" ]; then
+  exit 0
+fi
+
+cd web || exit 1
+
+echo "→ web: lint-staged (prettier + eslint --fix)"
+pnpm exec lint-staged --config ./package.json || exit 1
+
+echo "→ web: pnpm typecheck"
+pnpm typecheck || exit 1
+
+echo "→ web: pnpm test (no snapshot update)"
+pnpm test || exit 1
+
+exit 0

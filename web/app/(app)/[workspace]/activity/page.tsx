@@ -6,6 +6,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty";
+import { JsonView } from "@/components/ui/json-view";
 import { Select } from "@/components/ui/select";
 import { auditApi } from "@/lib/api/endpoints";
 import { formatDateTime } from "@/lib/format";
@@ -59,7 +60,23 @@ export default function ActivityPage() {
           </Select>
         </CardHeader>
         <CardContent className="p-0">
-          {rows.length === 0 ? (
+          {audit.isLoading ? (
+            <ul className="divide-y text-sm">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <li
+                  key={i}
+                  className="flex items-start justify-between gap-3 px-4 py-3"
+                >
+                  <div className="flex flex-1 flex-wrap items-center gap-2">
+                    <div className="h-5 w-12 animate-pulse rounded bg-muted" />
+                    <div className="h-5 w-20 animate-pulse rounded bg-muted" />
+                    <div className="h-4 w-48 animate-pulse rounded bg-muted" />
+                  </div>
+                  <div className="h-4 w-24 shrink-0 animate-pulse rounded bg-muted" />
+                </li>
+              ))}
+            </ul>
+          ) : rows.length === 0 ? (
             <div className="p-6">
               <EmptyState title="No activity yet" />
             </div>
@@ -94,9 +111,9 @@ export default function ActivityPage() {
                         <summary className="cursor-pointer text-xs text-muted-foreground">
                           diff
                         </summary>
-                        <pre className="mt-1 max-h-64 overflow-auto rounded bg-muted p-2 text-xs">
-                          {JSON.stringify(a.diff, null, 2)}
-                        </pre>
+                        <div className="mt-1 max-h-64 overflow-auto">
+                          <JsonView value={a.diff} />
+                        </div>
                       </details>
                     )}
                   </div>

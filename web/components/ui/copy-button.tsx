@@ -55,7 +55,7 @@ export function CopyButton({
     <button
       type="button"
       onClick={onClick}
-      aria-label={copied ? "Copied" : label}
+      aria-label={copied ? "Copied" : label || "Copy"}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-md border bg-background px-2 py-1 text-xs",
         "transition-colors hover:bg-accent hover:text-accent-foreground",

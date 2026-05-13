@@ -61,12 +61,14 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         now = time.monotonic()
+        wall_now = time.time()
         cutoff = now - 60.0
         with _LOCK:
             window = _BUCKETS[prefix]
             window[:] = [t for t in window if t >= cutoff]
             if len(window) >= rpm:
                 retry_after = max(1, int(60 - (now - window[0])))
+                reset_epoch = int(wall_now + retry_after)
                 return JSONResponse(
                     status_code=429,
                     content={
@@ -75,8 +77,23 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
                             f"agent token exceeded {rpm} req/min on /api/mcp/*"
                         ),
                     },
-                    headers={"Retry-After": str(retry_after)},
+                    headers={
+                        "Retry-After": str(retry_after),
+                        "X-RateLimit-Limit": str(rpm),
+                        "X-RateLimit-Remaining": "0",
+                        "X-RateLimit-Reset": str(reset_epoch),
+                    },
                 )
             window.append(now)
+            remaining = rpm - len(window)
+            # Reset is the time the oldest call in the window expires.
+            oldest = window[0]
+            reset_epoch = int(wall_now + max(0, int(60 - (now - oldest))))
 
-        return await call_next(request)
+        response = await call_next(request)
+        # Inform well-behaved MCP clients (Claude Code, Cursor) how much
+        # quota they have left so they can self-throttle.
+        response.headers["X-RateLimit-Limit"] = str(rpm)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        response.headers["X-RateLimit-Reset"] = str(reset_epoch)
+        return response

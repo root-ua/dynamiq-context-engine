@@ -84,6 +84,43 @@ Auditors looking at the new fact see the chain in one query:
 Without the link, B's mutation looks like a fresh assertion — there's
 no trace of which prior agent's work it built on.
 
+## Reading provenance for audit
+
+`get_provenance(edge_id)` returns a W3C PROV-O JSON-LD bundle. When
+you need to answer "who wrote this fact?" or "what did it come
+from?", call it directly rather than guessing from the edge's
+metadata:
+
+```json
+{
+  "tool": "get_provenance",
+  "arguments": {"edge_id": "<edge_id>"}
+}
+```
+
+Response (abridged):
+
+```json
+{
+  "@id": "dce:edge/...",
+  "dce:fact": "Alice works at Acme",
+  "wasGeneratedBy": {
+    "@type": "Activity",
+    "dce:kind": "extraction",
+    "wasAssociatedWith": {"@type": "Agent", "dce:agentKind": "llm", "dce:agentRef": "claude-sonnet-4-6"}
+  },
+  "wasAttributedTo": {"@type": "Agent", "dce:agentKind": "llm"},
+  "wasDerivedFrom": [
+    {"@type": "Entity", "dce:Episode": "...", "dce:snippet": "Alice joined Acme last quarter"},
+    {"@type": "Activity", "@id": "dce:activity/<upstream-a-id>"}
+  ]
+}
+```
+
+`wasDerivedFrom` is an array if the edge has multiple sources
+(episode + upstream activities). Walk it in audit flows; surface
+the source-episode snippet in UIs.
+
 ## Don't
 
 - Don't fake a self-link (`derived_activity_id ==

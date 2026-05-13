@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   PiChatsCircle,
   PiFile,
@@ -88,10 +88,22 @@ async function toBase64(file: File): Promise<string> {
   return btoa(bin);
 }
 
+interface ExtractionWatch {
+  episodeId: string;
+  startedAt: number; // ms
+  status: "processing" | "completed" | "failed" | "timed_out";
+  entities: number;
+  edges: number;
+  error?: string;
+}
+
 export default function PlaygroundPage() {
   const { workspace } = useWorkspace();
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [tools, setTools] = useState<ToolEvent[]>([]);
+  const [extractions, setExtractions] = useState<
+    Record<string, ExtractionWatch>
+  >({});
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [pending, setPending] = useState<AttachedFile[]>([]);
@@ -301,13 +313,36 @@ export default function PlaygroundPage() {
               },
             ]);
           } else if (evt.type === "tool_result") {
-            setTools((curr) =>
-              curr.map((t) =>
+            setTools((curr) => {
+              const updated = curr.map((t) =>
                 t.id === evt.tool_use_id
-                  ? { ...t, result: evt.content, status: "done" }
+                  ? { ...t, result: evt.content, status: "done" as const }
                   : t,
-              ),
-            );
+              );
+              // If this was an add_episode call, kick off extraction
+              // polling so the user sees a "Extracting facts…" pill that
+              // resolves to "✓ N entities · M facts extracted".
+              const matched = updated.find((t) => t.id === evt.tool_use_id);
+              if (matched?.name === "add_episode") {
+                const result = evt.content as
+                  | { episode?: { id?: string } }
+                  | undefined;
+                const episodeId = result?.episode?.id;
+                if (episodeId) {
+                  setExtractions((prev) => ({
+                    ...prev,
+                    [episodeId]: {
+                      episodeId,
+                      startedAt: Date.now(),
+                      status: "processing",
+                      entities: 0,
+                      edges: 0,
+                    },
+                  }));
+                }
+              }
+              return updated;
+            });
           } else if (evt.type === "error" && typeof evt.detail === "string") {
             setTurns((curr) => [
               ...curr,
@@ -335,7 +370,103 @@ export default function PlaygroundPage() {
     setTurns([]);
     setTools([]);
     setPending([]);
+    setExtractions({});
   }, []);
+
+  // Poll every in-flight extraction job until it lands or times out.
+  // Episodes returned by add_episode start at processing_status=pending
+  // and flip to completed / failed; we hit /api/episodes/{id} every
+  // ~1.5s for up to 30s. Each pill updates in-place so the chat shows
+  // the user that ingestion is actually happening.
+  useEffect(() => {
+    const inflight = Object.values(extractions).filter(
+      (e) => e.status === "processing",
+    );
+    if (!workspace || inflight.length === 0) return;
+    const wsId = workspace.id;
+    const timer = setInterval(() => {
+      void Promise.all(
+        inflight.map(async (e) => {
+          if (Date.now() - e.startedAt > 30_000) {
+            setExtractions((curr) =>
+              curr[e.episodeId]?.status === "processing"
+                ? {
+                    ...curr,
+                    [e.episodeId]: {
+                      ...curr[e.episodeId]!,
+                      status: "timed_out",
+                    },
+                  }
+                : curr,
+            );
+            return;
+          }
+          try {
+            const token = await getToken(wsId);
+            const res = await fetch(`${API_URL}/api/episodes/${e.episodeId}`, {
+              headers: {
+                Accept: "application/json",
+                "X-Workspace-Id": wsId,
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              },
+              credentials: "include",
+            });
+            if (!res.ok) return;
+            const body = (await res.json()) as {
+              processing_status: string;
+              processing_error: string | null;
+            };
+            if (
+              body.processing_status === "completed" ||
+              body.processing_status === "failed"
+            ) {
+              // Once the episode is done we have a status; counts come from
+              // a follow-up that asks how many edges cite this episode.
+              const edgesRes = await fetch(
+                `${API_URL}/api/edges?source_id=${e.episodeId}&source_kind=episode&limit=200`,
+                {
+                  headers: {
+                    Accept: "application/json",
+                    "X-Workspace-Id": wsId,
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                  },
+                  credentials: "include",
+                },
+              ).catch(() => null);
+              let edges = 0;
+              let entities = 0;
+              if (edgesRes?.ok) {
+                const edgesBody = (await edgesRes.json()) as Array<{
+                  subject_id: string;
+                  object_id: string;
+                }>;
+                edges = edgesBody.length;
+                entities = new Set(
+                  edgesBody.flatMap((r) => [r.subject_id, r.object_id]),
+                ).size;
+              }
+              setExtractions((curr) => ({
+                ...curr,
+                [e.episodeId]: {
+                  ...curr[e.episodeId]!,
+                  status:
+                    body.processing_status === "completed"
+                      ? "completed"
+                      : "failed",
+                  entities,
+                  edges,
+                  error: body.processing_error ?? undefined,
+                },
+              }));
+            }
+          } catch {
+            /* swallow — try again next tick */
+          }
+        }),
+      );
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [extractions, workspace]);
 
   const shareTrace = useCallback(() => {
     const blob = new Blob([JSON.stringify({ turns, tools }, null, 2)], {
@@ -395,6 +526,7 @@ export default function PlaygroundPage() {
           onClick={() => setPaneTab("chat")}
           className={cn(
             "flex-1 py-2 text-xs",
+            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
             paneTab === "chat" && "border-b-2 border-foreground font-medium",
           )}
         >
@@ -405,6 +537,7 @@ export default function PlaygroundPage() {
           onClick={() => setPaneTab("trace")}
           className={cn(
             "flex-1 py-2 text-xs",
+            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
             paneTab === "trace" && "border-b-2 border-foreground font-medium",
           )}
         >
@@ -515,6 +648,60 @@ export default function PlaygroundPage() {
               );
             })}
           </div>
+
+          {/* In-flight extraction pills (one per add_episode tool call). */}
+          {Object.values(extractions).length > 0 && (
+            <div className="flex flex-col gap-1 border-t bg-muted/10 px-3 py-2 text-xs">
+              {Object.values(extractions).map((e) => {
+                if (e.status === "processing") {
+                  return (
+                    <div
+                      key={e.episodeId}
+                      className="inline-flex items-center gap-2 text-muted-foreground"
+                    >
+                      <span className="size-2 animate-pulse rounded-full bg-amber-500" />
+                      Extracting facts from episode{" "}
+                      <code className="font-mono">
+                        {e.episodeId.slice(0, 8)}…
+                      </code>
+                    </div>
+                  );
+                }
+                if (e.status === "completed") {
+                  return (
+                    <div
+                      key={e.episodeId}
+                      className="inline-flex items-center gap-2 text-emerald-700 dark:text-emerald-400"
+                    >
+                      <span className="size-2 rounded-full bg-emerald-500" />
+                      {e.entities} entities · {e.edges} facts extracted
+                    </div>
+                  );
+                }
+                if (e.status === "failed") {
+                  return (
+                    <div
+                      key={e.episodeId}
+                      className="inline-flex items-center gap-2 text-red-700 dark:text-red-400"
+                      title={e.error}
+                    >
+                      <span className="size-2 rounded-full bg-red-500" />
+                      Extraction failed{e.error ? ` — ${e.error}` : ""}
+                    </div>
+                  );
+                }
+                return (
+                  <div
+                    key={e.episodeId}
+                    className="inline-flex items-center gap-2 text-muted-foreground"
+                  >
+                    <span className="size-2 rounded-full bg-muted-foreground/60" />
+                    Extraction still running (no worker?)
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* Pending attachments */}
           {pending.length > 0 && (

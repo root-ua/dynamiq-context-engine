@@ -82,6 +82,23 @@ Pass `derived_from_activity_ids` if this episode is itself derived
 from another agent's prior activity — see
 [agent-to-agent-provenance](../agent-to-agent-provenance/SKILL.md).
 
+## Corrections after the fact
+
+What's already landed sometimes needs fixing. Two surgical tools:
+
+- **`update_entity`** — change canonical name, aliases, summary, or
+  props on an existing entity. Validates props against the type's
+  JSON Schema; rejects ones that don't match.
+- **`invalidate_fact`** — close an edge's `valid_time` and `sys_time`
+  windows. The edge isn't deleted (that would break the bi-temporal
+  audit trail); it's marked as no-longer-true with a recorded
+  `reason`. Subsequent `live_edges` queries skip it; `history`
+  still returns it.
+
+Use `invalidate_fact` over `add_fact(... valid_to=now)` when the
+fact was simply wrong rather than naturally ending — the audit log
+distinguishes the two.
+
 ## Don't
 
 - Don't call `add_fact` with hallucinated entity IDs. Always

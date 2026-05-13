@@ -26,6 +26,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty";
+import { JsonView } from "@/components/ui/json-view";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/toast";
 import { mcpApi } from "@/lib/api/endpoints";
@@ -209,9 +210,9 @@ export default function AgentConsolePage() {
                     <CardTitle className="text-sm">Result</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <pre className="max-h-96 overflow-auto rounded-md bg-muted p-3 text-xs">
-                      {JSON.stringify(lastResult, null, 2)}
-                    </pre>
+                    <div className="max-h-96 overflow-auto">
+                      <JsonView value={lastResult} />
+                    </div>
                   </CardContent>
                 </Card>
               )}
@@ -334,12 +335,14 @@ function SessionsTab({
                       input / output
                     </summary>
                     <div className="mt-2 grid gap-2 text-xs lg:grid-cols-2">
-                      <pre className="overflow-auto rounded bg-muted p-2">
-                        {JSON.stringify(c.input, null, 2)}
-                      </pre>
-                      <pre className="overflow-auto rounded bg-muted p-2">
-                        {c.error ?? JSON.stringify(c.output, null, 2)}
-                      </pre>
+                      <JsonView value={c.input} />
+                      {c.error ? (
+                        <pre className="overflow-auto rounded bg-muted p-2 text-destructive">
+                          {c.error}
+                        </pre>
+                      ) : (
+                        <JsonView value={c.output} />
+                      )}
                     </div>
                   </details>
                 </li>

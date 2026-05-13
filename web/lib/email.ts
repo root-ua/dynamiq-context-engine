@@ -23,7 +23,6 @@ export async function sendTransactional(payload: Payload): Promise<void> {
   if (!apiKey) {
     // Dev fallback — print the email so the developer can click the link
     // from the terminal without configuring Resend.
-    // eslint-disable-next-line no-console
     console.log(
       `\n[email.dev-fallback] to=${payload.to} subject=${payload.subject}\n${payload.text}\n`,
     );

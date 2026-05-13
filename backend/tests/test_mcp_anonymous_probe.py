@@ -32,9 +32,12 @@ def test_mcp_rpc_liveness_is_anonymous(client: TestClient) -> None:
     r = client.get("/api/mcp/rpc")
     assert r.status_code == 200, r.text
     body = r.json()
-    # The probe must advertise the MCP protocol version so a Claude
-    # Web Connector form knows it's reached an MCP server.
-    assert "protocolVersion" in body or "version" in body
+    # The probe must advertise the MCP protocol + version so a Claude
+    # Web Connector form (or curl) knows it's reached an MCP server.
+    # Both keys are load-bearing for compatibility shims that pick one
+    # over the other.
+    assert body.get("protocol") == "mcp", body
+    assert body.get("version") == "2025-06-18", body
 
 
 def test_oauth_protected_resource_metadata_is_anonymous(

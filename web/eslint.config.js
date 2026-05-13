@@ -8,7 +8,6 @@
 // shim keeps the existing rules wired without forcing that diff today.
 
 const { FlatCompat } = require("@eslint/eslintrc");
-const path = require("path");
 
 const compat = new FlatCompat({
   baseDirectory: __dirname,
@@ -18,7 +17,17 @@ const legacy = require("./.eslintrc.js");
 
 module.exports = [
   {
-    ignores: legacy.ignorePatterns || [],
+    // `next lint` excluded the root config files implicitly; the ESLint
+    // CLI does not, so list them here. The TS parser-with-project would
+    // otherwise complain that these files aren't in tsconfig.json.
+    ignores: [
+      ...(legacy.ignorePatterns || []),
+      ".eslintrc.js",
+      "eslint.config.js",
+      "next.config.js",
+      "postcss.config.js",
+      "tailwind.config.ts",
+    ],
   },
   ...compat.config(legacy),
 ];

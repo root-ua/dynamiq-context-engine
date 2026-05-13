@@ -106,7 +106,7 @@ function buildSnippet(client: Client, baseUrl: string, token: string): string {
         "from openai import OpenAI",
         "client = OpenAI()",
         "resp = client.responses.create(",
-        '    model="gpt-5",',
+        '    model="gpt-4o",  # or whatever current OpenAI model you have access to',
         "    tools=[{",
         '        "type": "mcp",',
         '        "server_label": "dynamiq",',
@@ -281,6 +281,8 @@ export default function AgentsSettingsPage() {
                           <Button
                             size="sm"
                             variant="ghost"
+                            aria-label={`Revoke token ${t.name}`}
+                            title="Revoke token"
                             onClick={() => {
                               if (
                                 confirm(

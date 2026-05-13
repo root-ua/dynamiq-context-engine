@@ -512,46 +512,7 @@ async def live_edges(
 
     sql = _EDGE_SELECT + f" WHERE {' AND '.join(conditions)} ORDER BY lower(e.valid_time) DESC LIMIT :limit"
     result = await session.execute(text(sql), params)
-    edges = [_row_to_edge(r) for r in result.mappings()]
-    return await _maybe_recheck_under_high_sensitivity(session, edges, principal)
-
-
-async def _maybe_recheck_under_high_sensitivity(
-    session: AsyncSession,
-    edges: list["Edge"],
-    principal: Principal | None,
-) -> list["Edge"]:
-    """Mirror of the hybrid-retrieval source-recheck for direct edge
-    reads (Phase P4). Filters edges through ``check_access`` when the
-    workspace is high-sensitivity and the caller is a non-admin user.
-
-    Returns ``edges`` unchanged when:
-    * the caller is admin/owner/service (consistent with ACL bypass),
-    * the workspace's ``high_sensitivity`` flag is off, or
-    * the input is empty.
-    """
-    if principal is None or not edges:
-        return edges
-    if principal.kind == "service" or principal.role in ("owner", "admin"):
-        return edges
-    workspace_id = edges[0].workspace_id
-    ws_row = (
-        await session.execute(
-            text("SELECT high_sensitivity FROM workspace WHERE id = :id"),
-            {"id": workspace_id},
-        )
-    ).first()
-    if not (ws_row and ws_row[0]):
-        return edges
-    from app.retrieval.hybrid import recheck_edge_ids
-
-    allowed = await recheck_edge_ids(
-        session,
-        workspace_id=workspace_id,
-        edge_ids=[e.id for e in edges],
-        principal=principal,
-    )
-    return [e for e in edges if e.id in allowed]
+    return [_row_to_edge(r) for r in result.mappings()]
 
 
 async def history(
@@ -580,8 +541,7 @@ async def history(
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     sql = _EDGE_SELECT + f" {where} ORDER BY lower(e.sys_time) DESC, lower(e.valid_time) DESC LIMIT :limit"
     result = await session.execute(text(sql), params)
-    edges = [_row_to_edge(r) for r in result.mappings()]
-    return await _maybe_recheck_under_high_sensitivity(session, edges, principal)
+    return [_row_to_edge(r) for r in result.mappings()]
 
 
 async def as_of(

@@ -45,7 +45,7 @@ PROV_CONTEXT: dict[str, Any] = {
 
 
 ActivityKind = str  # 'extraction'|'contradiction'|'manual_edit'|'merge'|'action'|'seed'|'approval'
-AgentKind = str  # 'llm'|'user'|'system'|'connector'
+AgentKind = str  # 'llm'|'user'|'system'
 
 
 @dataclass
@@ -283,7 +283,6 @@ async def get_edge_provenance(
                   a.ended_at::text AS activity_ended_at,
                   ep.id::text AS episode_id,
                   LEFT(COALESCE(ep.content_text, ''), 200) AS episode_snippet,
-                  ep.external_url AS episode_url,
                   ep.source_kind AS episode_source_kind
                 FROM edge e
                 LEFT JOIN prov_activity a ON a.id = e.prov_activity_id
@@ -333,7 +332,6 @@ async def get_edge_provenance(
                 "@type": ["Entity", "dce:Episode"],
                 "dce:snippet": row["episode_snippet"],
                 "dce:sourceKind": row["episode_source_kind"],
-                "dce:externalUrl": row["episode_url"],
             }
         )
 
@@ -379,19 +377,15 @@ async def get_episode_provenance(
                 SELECT
                   ep.id::text AS episode_id,
                   LEFT(COALESCE(ep.content_text, ''), 200) AS snippet,
-                  ep.external_url,
                   ep.source_kind,
                   ep.ingested_at::text AS ingested_at,
                   a.id::text AS activity_id,
                   a.kind AS activity_kind,
                   a.agent_kind, a.agent_ref, a.agent_version,
                   a.started_at::text AS activity_started_at,
-                  a.ended_at::text AS activity_ended_at,
-                  ep.connector_instance_id::text AS connector_id,
-                  ci.connector_kind
+                  a.ended_at::text AS activity_ended_at
                 FROM episode ep
                 LEFT JOIN prov_activity a ON a.id = ep.prov_activity_id
-                LEFT JOIN connector_instance ci ON ci.id = ep.connector_instance_id
                 WHERE ep.id = :id
                 """
             ),
@@ -407,7 +401,6 @@ async def get_episode_provenance(
     doc["@type"] = ["Entity", "dce:Episode"]
     doc["dce:snippet"] = row["snippet"]
     doc["dce:sourceKind"] = row["source_kind"]
-    doc["dce:externalUrl"] = row["external_url"]
     if row["activity_id"]:
         agent_node: dict[str, Any] = {
             "@id": f"dce:agent/{row['agent_kind']}/{row['agent_ref'] or 'unknown'}",
@@ -427,10 +420,4 @@ async def get_episode_provenance(
         if row["activity_ended_at"]:
             activity_node["endedAtTime"] = row["activity_ended_at"]
         doc["wasGeneratedBy"] = activity_node
-    if row["connector_id"]:
-        doc["dce:fromConnector"] = {
-            "@id": f"dce:connector/{row['connector_id']}",
-            "@type": "Agent",
-            "dce:connectorKind": row["connector_kind"],
-        }
     return doc

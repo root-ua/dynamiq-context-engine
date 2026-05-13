@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response

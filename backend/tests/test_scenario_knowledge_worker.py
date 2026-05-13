@@ -1,31 +1,23 @@
-"""Knowledge-worker scenarios — Drive/Notion ingest → search → entity
+"""Knowledge-worker scenarios — agent-pushed ingest → search → entity
 timeline → review queue → export.
 
 Each test exercises a real end-to-end flow that a knowledge worker at
-the first enterprise customer would run. Tests hit a real Postgres and
-the in-process MinIO/Redis. The Drive + Notion connectors are pinned to
-mock mode by the ``enterprise_workspace`` fixture.
-
-All tests share the ``enterprise_workspace`` fixture from
-``tests/fixtures/enterprise.py``. The fixture seeds 3 users with bridged
-Google identities matching the Drive mock's ACL principals, a default
-``pii``/``public`` mutually_exclusive policy, and registered Drive +
-Notion connector_instances in mock mode.
+the first enterprise customer would run. After Phase R the platform no
+longer owns connectors; the ingestion path is the agent calling
+``add_episode`` (or REST POST /api/episodes) and the platform handling
+the rest. The ``enterprise_workspace`` fixture seeds 3 users (admin /
+2 editors) and a ``pii``/``public`` label policy.
 """
 from __future__ import annotations
 
 import gzip
-import io
-import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 
 from app.auth.jwt import Principal
-from app.connectors import _drive_mock, _notion_mock
-from app.connectors.upsert import upsert_item
 from app.db.session import session_scope
 from app.domain import edge as edge_mod
 from app.domain import entity as entity_mod
@@ -34,8 +26,6 @@ from app.domain import proposals as proposals_mod
 from app.domain import provenance as prov_mod
 from app.domain import sensitivity as sens_mod
 from app.retrieval.hybrid import search as hybrid_search
-from tests.fixtures.enterprise import EnterpriseFixture
-
 
 pytestmark = pytest.mark.scenario
 
@@ -51,54 +41,28 @@ def _principal(user: Any, workspace_id: str) -> Principal:
     )
 
 
-async def _ingest_drive_mock(
-    enterprise: EnterpriseFixture,
-) -> None:
-    """Run the Drive mock's initial crawl directly through ``upsert_item``.
-
-    Bypasses the OAuth/credentials machinery (covered by test_drive_e2e)
-    so scenario tests focus on the post-ingest behaviour.
-    """
-    ws_id = enterprise.workspace_id
-    async with session_scope(workspace_id=ws_id, user_id=enterprise.owner.id) as session:
-        for item in _drive_mock.initial_items():
-            await upsert_item(
-                session,
-                workspace_id=ws_id,
-                connector_instance_id=enterprise.drive_instance_id,
-                item=item,
-            )
-
-
 # ---------------------------------------------------------------------------
-# K1. Drive ingest → search → ACL filter (per-user visibility matrix)
+# K1. Agent-pushed episode → search returns it
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_drive_ingest_and_acl_visibility(enterprise_workspace):
+async def test_agent_pushed_episode_search(enterprise_workspace):
+    """The replacement for the old Drive-ingest scenario. An agent
+    pushes an episode in via ``add_episode``; a workspace member can
+    find it back through hybrid search."""
     e = enterprise_workspace
-    await _ingest_drive_mock(e)
-
     ws_id = e.workspace_id
 
-    # Sanity check: ingest landed the three mock episodes.
     async with session_scope(workspace_id=ws_id, user_id=e.alice.id) as session:
-        ingested = (
-            await session.execute(
-                text(
-                    "SELECT external_id FROM episode "
-                    "WHERE connector_instance_id = CAST(:id AS uuid)"
-                ),
-                {"id": e.drive_instance_id},
-            )
-        ).scalars().all()
-    assert set(ingested) == {"alpha-shared", "bravo-team", "charlie-private"}
+        ep = await episode_mod.add_episode(
+            session,
+            workspace_id=ws_id,
+            content="Q3 engineering OKRs covering platform launch.",
+            source_kind="agent",
+            embed=False,
+        )
 
-    # Alice (alice@acme.com) — domain match against alpha-shared,
-    # explicit ACL on bravo-team. Search hits use ``source_kind`` as
-    # the title field; assert visibility via the snippet content
-    # ("Q3 OKRs" appears in alpha-shared's content_text).
     alice_principal = _principal(e.alice, ws_id)
     async with session_scope(workspace_id=ws_id, user_id=e.alice.id) as session:
         hits = await hybrid_search(
@@ -109,22 +73,7 @@ async def test_drive_ingest_and_acl_visibility(enterprise_workspace):
             include_kinds=("episode",),
             principal=alice_principal,
         )
-    alice_snippets = " ".join(h.snippet for h in hits)
-    assert "engineering OKRs" in alice_snippets, alice_snippets
-
-    # Charlie-private is hr@-only. Alice must NOT see it.
-    alice_ids = {h.id for h in hits}
-    async with session_scope(workspace_id=ws_id, user_id=e.alice.id) as session:
-        charlie_id = (
-            await session.execute(
-                text(
-                    "SELECT id::text FROM episode "
-                    "WHERE external_id = 'charlie-private' "
-                    "AND deleted_at IS NULL"
-                )
-            )
-        ).scalar_one()
-    assert charlie_id not in alice_ids
+    assert any(h.id == ep.id for h in hits), [h.id for h in hits]
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +109,7 @@ async def test_bi_temporal_as_of(enterprise_workspace):
             predicate="works_at",
             object_id=acme.id,
             fact="Alice works at Acme K2",
-            valid_from=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            valid_from=datetime(2024, 1, 1, tzinfo=UTC),
             embed=False,
             run_contradictor=False,
         )
@@ -172,7 +121,7 @@ async def test_bi_temporal_as_of(enterprise_workspace):
             predicate="works_at",
             object_id=globex.id,
             fact="Alice works at Globex K2",
-            valid_from=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            valid_from=datetime(2025, 6, 1, tzinfo=UTC),
             embed=False,
             run_contradictor=False,
         )
@@ -180,14 +129,14 @@ async def test_bi_temporal_as_of(enterprise_workspace):
         # as-of in 2024 → Acme.
         rows_2024 = await edge_mod.as_of(
             session,
-            valid_at=datetime(2024, 9, 1, tzinfo=timezone.utc),
+            valid_at=datetime(2024, 9, 1, tzinfo=UTC),
             subject_id=alice.id,
             predicate="works_at",
         )
         # as-of in 2025 → Globex.
         rows_2025 = await edge_mod.as_of(
             session,
-            valid_at=datetime(2025, 9, 1, tzinfo=timezone.utc),
+            valid_at=datetime(2025, 9, 1, tzinfo=UTC),
             subject_id=alice.id,
             predicate="works_at",
         )
@@ -396,90 +345,6 @@ async def test_label_policy_drops_for_editor_not_admin(enterprise_workspace):
 
 
 # ---------------------------------------------------------------------------
-# K7. Source-recheck fires when workspace is high-sensitivity
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_high_sensitivity_source_recheck_drops_revoked(
-    enterprise_workspace, monkeypatch
-):
-    e = enterprise_workspace
-    await _ingest_drive_mock(e)
-    ws_id = e.workspace_id
-
-    # Flip the flag.
-    async with session_scope(workspace_id=ws_id, user_id=e.owner.id) as session:
-        await session.execute(
-            text(
-                "UPDATE workspace SET high_sensitivity = TRUE WHERE id = :id"
-            ),
-            {"id": ws_id},
-        )
-
-    # Patch the Drive connector so EVERY check_access call returns False.
-    from app.connectors import google_drive
-
-    async def deny(self, session, *, workspace_id, principal_user_id, source_ref):
-        return False
-
-    monkeypatch.setattr(
-        google_drive.GoogleDriveConnector, "check_access", deny, raising=True
-    )
-
-    # Carol should now see zero edges (no episodes show through either,
-    # but we focus on the edge fan-out from the alpha-shared episode).
-    alice_principal = _principal(e.alice, ws_id)
-    async with session_scope(workspace_id=ws_id, user_id=e.alice.id) as session:
-        # Force at least one edge to exist tied to a Drive episode.
-        alice_ent = await entity_mod.create(
-            session, workspace_id=ws_id, type_ref="person",
-            canonical="Alice K7", embed=False,
-        )
-        # Pick the alpha-shared episode.
-        ep_id = (
-            await session.execute(
-                text(
-                    "SELECT id::text FROM episode "
-                    "WHERE external_id = 'alpha-shared' "
-                    "AND deleted_at IS NULL"
-                )
-            )
-        ).scalar_one()
-        eng = await entity_mod.create(
-            session, workspace_id=ws_id, type_ref="organization",
-            canonical="Engineering K7", embed=False,
-        )
-        await edge_mod.add_fact(
-            session,
-            workspace_id=ws_id,
-            subject_id=alice_ent.id,
-            predicate="works_at",
-            object_id=eng.id,
-            fact="Alice K7 works at Engineering K7",
-            source_id=ep_id,
-            source_kind="episode",
-            embed=False,
-            run_contradictor=False,
-        )
-
-        # Hybrid search returns nothing for edges because source-recheck
-        # denied every backing episode. (No need for embeddings — the
-        # text/FTS path still produces candidates that then get filtered.)
-        hits = await hybrid_search(
-            session,
-            workspace_id=ws_id,
-            query="Engineering",
-            limit=10,
-            include_kinds=("edge",),
-            principal=alice_principal,
-        )
-    edge_hits_from_alpha = [h for h in hits if h.kind == "edge"]
-    # Source recheck dropped them all.
-    assert edge_hits_from_alpha == []
-
-
-# ---------------------------------------------------------------------------
 # K8. Document revision restore round-trip
 # ---------------------------------------------------------------------------
 
@@ -524,7 +389,8 @@ async def test_document_revision_restore_round_trip(enterprise_workspace):
         assert rev_id
 
         # Edit: drop block 3, add block 4.
-        edited = original_blocks[:2] + [
+        edited = [
+            *original_blocks[:2],
             {
                 "id": "00000000-0000-0000-0000-000000000004",
                 "parent_block_id": None,
@@ -614,10 +480,6 @@ async def test_workspace_export_round_trip(enterprise_workspace):
             )
         ).first()
         job_id = job_row[0]
-
-    # MinIO requires CONNECTOR_SECRET_KEY too in some paths — set a
-    # reasonable test key for the storage client.
-    os.environ.setdefault("CONNECTOR_SECRET_KEY", "test-key")
 
     from app.workers.export import run_workspace_export
 

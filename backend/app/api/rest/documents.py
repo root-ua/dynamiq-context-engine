@@ -35,13 +35,13 @@ async def _require_doc_in_workspace(
 
 
 # Hard limit — avoid OOM on a surprise 100MB drop. 10 MB is enough for
-# notes/markdown imports; larger files should go through a proper
-# extraction pipeline once we build one.
+# the prose-document case.
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
-# MIME types we know how to convert to a block tree directly. Binary
-# formats (PDF, DOCX) get accepted as attachments but extraction is
-# out of scope for this endpoint.
+# Binary-format upload (PDF / DOCX / images) is the agent's job — Claude
+# Code or the playground reads the file, extracts text, then calls
+# ``add_episode`` via MCP. The web upload endpoint accepts already-text
+# content (the block editor's source-of-truth shape).
 TEXT_MIME_TYPES = {
     "text/plain",
     "text/markdown",
@@ -198,11 +198,12 @@ async def upload_document(
     session: DbSession,
     file: UploadFile = File(...),
 ) -> DocumentOut:
-    """Turn an uploaded text/markdown file into a new document.
+    """Turn an uploaded text / markdown file into a new document.
 
-    Binary formats (PDF, DOCX) return 415 for now. They should eventually
-    flow through a proper extraction worker; wire that in once we build
-    the ingestion pipeline.
+    Binary formats (PDF, DOCX, etc.) are out of scope here — that's the
+    calling agent's job. Claude Code reads the file, extracts text,
+    and calls ``add_episode`` (MCP) with the resulting body; the
+    platform handles the rest from there.
     """
     if not principal.workspace_id:
         raise HTTPException(400, "workspace required")
@@ -216,8 +217,10 @@ async def upload_document(
         raise HTTPException(
             status_code=415,
             detail=(
-                "only text and markdown files are supported for now. "
-                "Binary extraction (PDF/DOCX) is not yet wired up."
+                "only text/markdown uploads are accepted here. "
+                "For PDFs and other binary formats, have the agent "
+                "(Claude Code, the playground) extract text and call "
+                "the MCP `add_episode` tool."
             ),
         )
 
@@ -232,10 +235,9 @@ async def upload_document(
     except UnicodeDecodeError as exc:
         raise HTTPException(400, "file is not valid UTF-8 text") from exc
 
-    # Title: strip the extension and tidy whitespace.
     title = PurePosixPath(filename).stem.strip() or "Untitled"
-
-    type_slug = "note" if suffix in {".md", ".markdown", ".mdx"} else "note"
+    _ = suffix
+    type_slug = "note"
     doc = await doc_mod.create_document(
         session,
         workspace_id=principal.workspace_id,
@@ -244,9 +246,6 @@ async def upload_document(
         created_by=principal.user_id,
     )
 
-    # Split the body into paragraph blocks on blank-line boundaries. This
-    # keeps the block tree readable when the doc opens in the editor;
-    # the Yjs state is hydrated lazily on first edit.
     paragraphs = [p.strip() for p in text_body.split("\n\n") if p.strip()]
     if not paragraphs:
         paragraphs = [""]

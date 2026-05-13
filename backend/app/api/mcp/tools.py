@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -296,8 +296,8 @@ async def _add_fact(
         return {"error": "subject or object not found"}
 
     # ``prov_activity.agent_kind`` is constrained to
-    # {'llm','user','system','connector'} — service-token callers map
-    # to 'system'; session-JWT callers map to 'user'.
+    # {'llm','user','system'} — service-token callers map to 'system';
+    # session-JWT callers map to 'user'.
     agent_kind = "system" if principal.kind == "service" else "user"
     activity_id = await prov_mod.start_activity(
         session,
@@ -372,8 +372,8 @@ async def _add_episode(
     principal: Principal,
 ) -> dict[str, Any]:
     # ``prov_activity.agent_kind`` is constrained to
-    # {'llm','user','system','connector'} — service-token callers map
-    # to 'system'; session-JWT callers map to 'user'.
+    # {'llm','user','system'} — service-token callers map to 'system';
+    # session-JWT callers map to 'user'.
     agent_kind = "system" if principal.kind == "service" else "user"
     activity_id = await prov_mod.start_activity(
         session,
@@ -611,17 +611,17 @@ async def _shape_fact(
     label_rows = await sens_mod.labels_for(
         session, target_kind="edge", target_id=edge.id
     )
-    label_slugs = [l.slug for l in label_rows]
+    label_slugs = [row.slug for row in label_rows]
     provenance = await prov_mod.get_edge_provenance(session, edge.id)
     # Freshness in days from now; for an open-ended edge use the
     # ``valid_from`` lower bound.
     try:
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt
         vf = _dt.fromisoformat(edge.valid_from.replace(" ", "T"))
         if vf.tzinfo is None:
-            vf = vf.replace(tzinfo=_tz.utc)
+            vf = vf.replace(tzinfo=UTC)
         freshness_days = max(
-            0, int((_dt.now(_tz.utc) - vf).total_seconds() // 86400)
+            0, int((_dt.now(UTC) - vf).total_seconds() // 86400)
         )
     except Exception:
         freshness_days = None
@@ -679,7 +679,7 @@ async def _approve_proposal(session: AsyncSession, workspace_id: str, actor_id: 
 
 async def _list_labels(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ListLabelsIn) -> dict[str, Any]:
     labels = await sens_mod.list_labels(session, workspace_id=workspace_id)
-    return {"labels": [asdict(l) for l in labels]}
+    return {"labels": [asdict(label) for label in labels]}
 
 
 async def _list_action_types(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ListActionTypesIn) -> dict[str, Any]:
@@ -784,7 +784,7 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(name="create_relation_type", description="Create a new relation type with domain/range constraints, cardinality, and temporal / symmetric / transitive / high-stakes flags.", input_schema=CreateRelationTypeIn, handler=_create_relation_type),
     ToolSpec(name="propose_ontology", description="Ask the LLM to propose an ontology (entity and relation types) from sample text or existing episodes. Optionally apply the proposal immediately.", input_schema=ProposeOntologyIn, handler=_propose_ontology),
     ToolSpec(name="as_of_query", description="Query edges as they were at a past valid time (bi-temporal as-of query).", input_schema=AsOfIn, handler=_as_of_query),
-    ToolSpec(name="get_provenance", description="Return W3C PROV-O JSON-LD for a fact (edge), including the activity that produced it, the agent (LLM / user / connector), and the source episode it was derived from.", input_schema=GetProvenanceIn, handler=_get_provenance),
+    ToolSpec(name="get_provenance", description="Return W3C PROV-O JSON-LD for a fact (edge), including the activity that produced it, the agent (LLM / user / system), and the source episode it was derived from.", input_schema=GetProvenanceIn, handler=_get_provenance),
     ToolSpec(name="get_fact", description="Decision-support shortcut: return one structured fact for (subject, predicate) with confidence, freshness, label slugs, and provenance attached. Returns {error: 'no_fact'} when no live edge exists, or {multiple: true, candidates: [...]} when the subject has several values and ``object`` was not provided.", input_schema=GetFactIn, handler=_get_fact),
     ToolSpec(name="list_proposals", description="List facts in the review queue (pending / approved / rejected / superseded). Use this to surface low-confidence extractions that need human approval.", input_schema=ListProposalsIn, handler=_list_proposals),
     ToolSpec(name="approve_proposal", description="Approve a pending fact and promote it to a live edge. Reuses the same cardinality / contradictor invariants as direct fact insertion.", input_schema=ApproveProposalIn, handler=_approve_proposal),

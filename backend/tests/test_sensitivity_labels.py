@@ -32,7 +32,7 @@ async def test_create_and_list_labels(workspace):
             session, workspace_id=ws_id, slug="public", name="Public",
         )
         labels = await sens_mod.list_labels(session, workspace_id=ws_id)
-    slugs = sorted(l.slug for l in labels)
+    slugs = sorted(label.slug for label in labels)
     assert slugs == ["pii", "public"]
 
 

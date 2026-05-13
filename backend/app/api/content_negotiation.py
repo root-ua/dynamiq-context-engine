@@ -15,7 +15,6 @@ import re
 
 from fastapi import Request
 
-
 _LD_MEDIA = "application/ld+json"
 # Match ``application/ld+json`` with optional q-weight; tolerate
 # whitespace and trailing parameters.

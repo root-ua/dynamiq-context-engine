@@ -123,10 +123,6 @@ def _external_iri(kind: str, value: str) -> str:
         return f"mailto:{value}"
     if kind == "slug":
         return f"{_iri_base()}/slug/{quote(value, safe='')}"
-    if kind.startswith("connector:google_drive:"):
-        return f"https://drive.google.com/file/d/{value}"
-    if kind.startswith("connector:notion:"):
-        return f"https://www.notion.so/{value.replace('-', '')}"
     return f"urn:dce:ref:{quote(kind, safe='')}/{quote(value, safe='')}"
 
 

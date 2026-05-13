@@ -76,13 +76,11 @@ async def search(
     if graph_expand and fused:
         fused = await _graph_expand(session, workspace_id, fused, limit=limit * 2, principal=principal)
 
-    # Pipeline order (Phase P5):
+    # Pipeline order:
     #   1. Label-policy filter — drop sensitive results before any
     #      downstream work happens on them.
-    #   2. Source-recheck — drop revoked source rows in high-sens
-    #      workspaces.
-    #   3. Reranker — cross-encoder operates on the survivors only.
-    #   4. MMR — diversify within the final ranked set.
+    #   2. Reranker — cross-encoder operates on the survivors only.
+    #   3. MMR — diversify within the final ranked set.
 
     # 1. Label-policy filter.
     fused_dicts = [
@@ -102,30 +100,13 @@ async def search(
             warned=summary["warned"],
             policies=summary["policies"],
         )
-    # Carry through any policy_warnings the apply_label_policy step
-    # stamped onto candidates so the final hit payload can expose them.
     warnings_by_key: dict[tuple[str, str], list[str]] = {}
     for c in kept:
         if c.get("policy_warnings"):
             warnings_by_key[(c["kind"], c["id"])] = list(c["policy_warnings"])
     fused = [c["_hit"] for c in kept]
 
-    # 2. Source-recheck (high-sensitivity workspaces only).
-    if principal is not None and fused:
-        ws_row = (
-            await session.execute(
-                text(
-                    "SELECT high_sensitivity FROM workspace WHERE id = :id"
-                ),
-                {"id": workspace_id},
-            )
-        ).first()
-        if ws_row and ws_row[0]:
-            fused = await _source_recheck_top_n(
-                session, workspace_id, fused, principal, n=5
-            )
-
-    # 3. Optional cross-encoder rerank (RFC §18).
+    # 2. Optional cross-encoder rerank (RFC §18).
     if settings.reranker_enabled and fused:
         from app.retrieval.rerank import rerank as _rerank
 
@@ -141,7 +122,7 @@ async def search(
         )
         fused = [s["_hit"] for s in scored]
 
-    # 4. MMR for diversity.
+    # 3. MMR for diversity.
     reranked = _mmr(fused, k=limit, lambda_=0.7)
     final = reranked[:limit]
 
@@ -233,103 +214,6 @@ async def _enrich_payload(
         warnings = warnings_by_key.get(key, [])
         if warnings:
             h.payload["policy_warnings"] = warnings
-
-
-async def recheck_edge_ids(
-    session: AsyncSession,
-    *,
-    workspace_id: str,
-    edge_ids: list[str],
-    principal: Principal,
-) -> set[str]:
-    """Return the subset of ``edge_ids`` the principal can still read
-    according to the connector's live ``check_access`` call.
-
-    Admin / owner / service principals bypass the recheck (same shape as
-    ``edge_visibility_clause``). Edges with no connector-backed source
-    pass through unchanged.
-    """
-    if not edge_ids:
-        return set()
-    if principal.kind == "service" or principal.role in ("owner", "admin"):
-        return set(edge_ids)
-    rows = (
-        await session.execute(
-            text(
-                """
-                SELECT e.id::text AS edge_id,
-                       ci.connector_kind AS connector_kind,
-                       ep.external_id AS external_ref
-                FROM edge e
-                LEFT JOIN episode ep ON ep.id = e.source_id
-                  AND e.source_kind = 'episode'
-                LEFT JOIN connector_instance ci ON ci.id = ep.connector_instance_id
-                WHERE e.id = ANY(:ids)
-                """
-            ),
-            {"ids": edge_ids},
-        )
-    ).mappings().all()
-    by_edge: dict[str, dict] = {r["edge_id"]: dict(r) for r in rows}
-
-    from app.connectors.registry import get_connector
-
-    allowed: set[str] = set()
-    for eid in edge_ids:
-        info = by_edge.get(eid)
-        if not info or not info.get("connector_kind") or not info.get("external_ref"):
-            allowed.add(eid)  # No connector backing → pass through.
-            continue
-        try:
-            connector = get_connector(info["connector_kind"])
-            ok = await connector.check_access(
-                session,
-                workspace_id=workspace_id,
-                principal_user_id=principal.user_id,
-                source_ref=info["external_ref"],
-            )
-        except Exception as exc:
-            log.warning(
-                "retrieval.source_recheck_failed",
-                edge_id=eid, kind=info.get("connector_kind"), error=str(exc),
-            )
-            allowed.add(eid)  # Transient error → fail open per ACL convention.
-            continue
-        if ok:
-            allowed.add(eid)
-    return allowed
-
-
-async def _source_recheck_top_n(
-    session: AsyncSession,
-    workspace_id: str,
-    hits: list[SearchResult],
-    principal: Principal,
-    *,
-    n: int,
-) -> list[SearchResult]:
-    """For each edge hit in the top-N, ask the connector whether the
-    principal still has read access to the source. Revoked sources are
-    dropped silently.
-
-    Built on top of ``recheck_edge_ids``; tails past N pass through
-    unchanged.
-    """
-    if principal.kind == "service" or principal.role in ("owner", "admin"):
-        return hits
-    edge_top = [h for h in hits[:n] if h.kind == "edge"]
-    if not edge_top:
-        return hits
-    allowed = await recheck_edge_ids(
-        session,
-        workspace_id=workspace_id,
-        edge_ids=[h.id for h in edge_top],
-        principal=principal,
-    )
-    drop = {h.id for h in edge_top if h.id not in allowed}
-    if not drop:
-        return hits
-    return [h for h in hits if not (h.kind == "edge" and h.id in drop)]
 
 
 # ---------------------------------------------------------------------------

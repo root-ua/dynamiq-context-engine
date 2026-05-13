@@ -201,17 +201,16 @@ export default function SettingsPage() {
         <CardHeader>
           <CardTitle className="text-base">Privacy</CardTitle>
           <CardDescription>
-            Higher-sensitivity workspaces re-verify the caller&apos;s
-            source-system access for the top retrieval hits on every query.
+            Mark a workspace as high-sensitivity to hint to calling agents that
+            stricter prompting and human-in-the-loop checks are required.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex items-center justify-between gap-4">
           <div className="space-y-0.5">
             <Label htmlFor="high-sensitivity">High-sensitivity workspace</Label>
             <p className="text-xs text-muted-foreground">
-              When enabled, top-N edge results trigger a live
-              <code className="mx-1">check_access</code> with each connector
-              before being returned.
+              Surfaced to MCP clients as a workspace property. Does not
+              currently change retrieval behaviour.
             </p>
           </div>
           <Switch

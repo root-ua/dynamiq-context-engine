@@ -158,8 +158,8 @@ only if you need to tighten or relax the defaults.
 | `RERANKER_TOP_N` | `30` | How many top fused candidates pass through the reranker before MMR. |
 | `AUDIT_LOG_RETENTION_DAYS` | `365` | Daily cron purges `audit_log` rows older than this. Set to `0` to disable. |
 | `WORKER_DRAIN_SECONDS` | `30` | Cap on graceful drain after SIGTERM; the Arq worker exits hard after this. |
-| `NOTION_OAUTH_CLIENT_ID` / `NOTION_OAUTH_CLIENT_SECRET` | unset | Required for the real-mode Notion connector. Set `MOCK_NOTION=1` for development. |
-| `MOCK_NOTION` | `false` | Use deterministic mock pages instead of the Notion API. |
+| `PLAYGROUND_MODEL` | `claude-sonnet-4-6` | Model used by the chat-style playground page. |
+| `MCP_RATE_LIMIT_RPM` | `60` | In-memory per-token requests-per-minute cap on `/api/mcp/*`. Set to `0` to disable. |
 
 See `docs/architecture/rfc-001-alignment.md` for the full per-section
 status table.

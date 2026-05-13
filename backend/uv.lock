@@ -147,6 +147,25 @@ wheels = [
 ]
 
 [[package]]
+name = "anthropic"
+version = "0.101.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "docstring-parser" },
+    { name = "httpx" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b5/cb/9d0123243e749ac3a579972b2c398971bce1dc57bcc4efb08066df610360/anthropic-0.101.0.tar.gz", hash = "sha256:1116a6a87c55757e0fbe3e1ba40804fbd04de7963601a6dd6b539a889f18de3e", size = 758603, upload-time = "2026-05-11T15:46:33.944Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/b2/74ff06762d005ecf1658929a292df0acb786d025f6a6c54fcb30e2dc7761/anthropic-0.101.0-py3-none-any.whl", hash = "sha256:cc3cc6576989471e2aa9132258034ad0ff0d8fe500b04ac499e4e46ed68c5ed0", size = 753594, upload-time = "2026-05-11T15:46:32.216Z" },
+]
+
+[[package]]
 name = "anyio"
 version = "4.13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -548,11 +567,21 @@ wheels = [
 ]
 
 [[package]]
+name = "docstring-parser"
+version = "0.18.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e0/4d/f332313098c1de1b2d2ff91cf2674415cc7cddab2ca1b01ae29774bd5fdf/docstring_parser-0.18.0.tar.gz", hash = "sha256:292510982205c12b1248696f44959db3cdd1740237a968ea1e2e7a900eeb2015", size = 29341, upload-time = "2026-04-14T04:09:19.867Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a7/5f/ed01f9a3cdffbd5a008556fc7b2a08ddb1cc6ace7effa7340604b1d16699/docstring_parser-0.18.0-py3-none-any.whl", hash = "sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b", size = 22484, upload-time = "2026-04-14T04:09:18.638Z" },
+]
+
+[[package]]
 name = "dynamiq-context-engine-backend"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "anthropic" },
     { name = "argon2-cffi" },
     { name = "arq" },
     { name = "asyncpg" },
@@ -574,6 +603,7 @@ dependencies = [
     { name = "redis" },
     { name = "sentry-sdk", extra = ["fastapi"] },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "sse-starlette" },
     { name = "structlog" },
     { name = "tenacity" },
     { name = "tiktoken" },
@@ -597,21 +627,22 @@ shacl = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.14" },
+    { name = "anthropic", specifier = ">=0.42" },
     { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "arq", specifier = ">=0.26" },
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "jsonschema", specifier = ">=4.23" },
-    { name = "litellm", specifier = ">=1.53" },
+    { name = "litellm", specifier = ">=1.61" },
     { name = "mcp", specifier = ">=1.1" },
     { name = "minio", specifier = ">=7.2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "orjson", specifier = ">=3.10" },
     { name = "pgvector", specifier = ">=0.3.6" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
-    { name = "pydantic", extras = ["email"], specifier = ">=2.9" },
-    { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "pydantic", extras = ["email"], specifier = ">=2.11" },
+    { name = "pydantic-settings", specifier = ">=2.7" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
     { name = "pyshacl", marker = "extra == 'shacl'", specifier = ">=0.27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
@@ -623,7 +654,8 @@ requires-dist = [
     { name = "redis", specifier = ">=5.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.18" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
+    { name = "sse-starlette", specifier = ">=2.1" },
     { name = "structlog", specifier = ">=24.4" },
     { name = "tenacity", specifier = ">=9.0" },
     { name = "testcontainers", extras = ["postgres", "redis"], marker = "extra == 'dev'", specifier = ">=4.8" },

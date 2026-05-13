@@ -42,7 +42,6 @@ async def drain_arq(*, max_iterations: int = 50) -> int:
     Important: only jobs we know about (see ``_HANDLERS``) get run.
     Anything else is left in place and logged.
     """
-    import asyncio
     import pickle
 
     queue = await get_queue()

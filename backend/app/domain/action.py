@@ -579,12 +579,7 @@ async def _attach_evidence_to_fact(
     invocation: ActionInvocation,
     principal: Principal | None,
 ) -> dict[str, Any]:
-    """Append an evidence record to ``edge.props.evidence``.
-
-    Optionally posts a comment to the source Drive file via the connector
-    when the workspace has Drive write scope. The Drive write-back is
-    best-effort; failure is logged but doesn't fail the action.
-    """
+    """Append an evidence record to ``edge.props.evidence``."""
     edge_id = input["edge_id"]
     episode_id = input.get("episode_id")
     comment = input.get("comment", "")
@@ -662,15 +657,9 @@ async def _attach_evidence_to_fact(
                 edge_id=edge_id, error=str(exc),
             )
 
-    # Optional Drive write-back. Disabled by default — full implementation
-    # depends on the Drive connector exposing a write scope. Stub the
-    # decision here so the test asserts the no-op path.
-    drive_comment_posted = False
-
     return {
         "edge_id": edge_id,
         "episode_id": episode_id,
-        "drive_comment_posted": drive_comment_posted,
     }
 
 

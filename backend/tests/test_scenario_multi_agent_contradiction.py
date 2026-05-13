@@ -17,7 +17,6 @@ from app.auth.jwt import Principal
 from app.db.session import session_scope
 from app.domain import entity as entity_mod
 
-
 pytestmark = pytest.mark.scenario
 
 

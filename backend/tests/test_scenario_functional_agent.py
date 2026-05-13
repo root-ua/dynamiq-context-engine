@@ -10,7 +10,7 @@ confidence and freshness. Exercises:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -20,7 +20,6 @@ from app.db.session import session_scope
 from app.domain import edge as edge_mod
 from app.domain import entity as entity_mod
 from app.retrieval.hybrid import search as hybrid_search
-
 
 pytestmark = pytest.mark.scenario
 
@@ -55,7 +54,7 @@ async def test_functional_agent_get_fact_with_freshness(enterprise_workspace):
             subject_id=acme.id, predicate="tagged", object_id=topic.id,
             fact="Acme ARR 2025-Q3 = $60M",
             confidence=0.95,
-            valid_from=datetime(2025, 10, 1, tzinfo=timezone.utc),
+            valid_from=datetime(2025, 10, 1, tzinfo=UTC),
             embed=False, run_contradictor=False,
         )
 

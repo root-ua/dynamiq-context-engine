@@ -4,16 +4,16 @@ This document maps each load-bearing RFC-001 v3 section to the
 corresponding code in this repo. Rows are marked **implemented**,
 **partial**, **deferred**, or **out of scope** (explicit prior).
 
-Last updated: 2026-05-13 (Phase A–D + production-readiness pass F–H + TDD pass J–M + standards/agent pass N–Q)
+Last updated: 2026-05-14 (Phase R–Z: connector removal + DX + skills + playground + comparison docs + production hardening)
 
 ## Section-by-section
 
 | RFC § | Concept | Status | Code |
 |---|---|---|---|
-| §7 | Connector framework | **implemented** | `backend/app/connectors/base.py`, `registry.py`; Drive in `google_drive.py`; Notion in `notion.py` (mock-mode complete, real OAuth stubbed) |
-| §10 | Unified principal namespace | **partial** | `episode_acl(principal_kind, principal_external_id)` (`20260508_0001_source_acl_drive.py`), with `user|group|domain|anyone`; `edge.allowed_principals[]` / `episode.allowed_principals[]` denormalized fast path (`20260513_0003_sensitivity_and_acl.py`). Not yet generalized to blocks. |
+| §7 | Connector framework | **removed** (Phase R) | Ingestion is now the calling agent's job. The platform stops where the graph starts. Migration `20260514_0001_drop_connectors.py` removes `connector_instance`, `user_external_identity`, `episode_acl`, and the connector columns on `episode`. |
+| §10 | Unified principal namespace | **simplified to workspace + labels** (Phase R) | Workspace RLS + sensitivity labels are the entire ACL surface. The per-source ACL projection is gone with the connector framework. |
 | §11.4 | Sensitivity labels + policy | **implemented** | `sensitivity_label`, `episode_label`, `edge_label`, `label_policy` tables; `app/domain/sensitivity.py`; integrated into `app/retrieval/hybrid.py` |
-| §11.5 | Source re-check on top-N | **implemented** | `CrawlerConnector.check_access` hook (`base.py`); `_source_recheck_top_n` in `app/retrieval/hybrid.py`; gated on `workspace.high_sensitivity` |
+| §11.5 | Source re-check on top-N | **removed** (Phase R) | The platform doesn't pull source data itself any more, so there's nothing to re-check. The `workspace.high_sensitivity` column is kept as a hint to calling agents. |
 | §12 | Bi-temporal facts | **implemented** | `edge.valid_time` + `edge.sys_time` as `tstzrange` + GiST (`20260421_0001_initial_schema.py:262-282`); contradictor closes the prior fact at the new fact's `valid_from` |
 | §12-13 | OWL/SHACL/SPARQL/RDF triples | **out of scope** | Locked-in prior: Postgres typed property graph + JSON-Schema validation. JSON-LD at the API boundary is the standards-compatible escape hatch (see PROV-O §17). |
 | §15.2 | Per-class confidence thresholds + review queue | **implemented** | `extraction_policy` table, `pending_fact` table; `edge.propose_fact` routes by threshold; `/api/proposals` review queue; `/review` UI |
@@ -24,6 +24,50 @@ Last updated: 2026-05-13 (Phase A–D + production-readiness pass F–H + TDD pa
 | §20 | MCP server | **implemented + verified** | 22 tools (`app/api/mcp/tools.py`); full happy-path matrix covered by `test_scenario_mcp_agent.py::test_mcp_tool_happy_path` (parametrized over every tool); end-to-end agent flows (provenance round-trip, ACL filter, approval workflow, action idempotency, get_fact, agent-to-agent provenance) in same file + per-persona suites |
 | §22 | Audit log | **implemented** | `audit_log` table; every state-changing path writes a row |
 | §23 | Targets (100 QPS sustained) | **n/a** | Current single-node deploy. Kafka substrate explicitly deferred. |
+
+## Phase R–Z (final production-readiness pass)
+
+Architectural pivot:
+- **R. Connector removal.** The platform owned a connector framework
+  (Drive + Notion mock connectors, ACL snapshot, source-recheck) that
+  blurred the product story. Removed: `backend/app/connectors/`, the
+  REST `connectors` / `identity` / `sources` endpoints, the crawler
+  worker, the per-source `episode_acl` and `user_external_identity`
+  tables, the connector-coupled columns on `episode`, and every
+  frontend page that surfaced them. Migration `20260514_0001` does
+  the drop. Visibility now collapses to workspace RLS + sensitivity
+  label policy.
+
+Adjacent work, in dependency order:
+- **S. DX + dependency tightening.** MinIO image pinned, `.nvmrc`,
+  Python deps bumped, top-level `Makefile`, README rewrite around an
+  explicit Quick Start, `CONTRIBUTING.md`, audited `.env.example`.
+- **T. Agent skills library.** `skills/` folder with one `SKILL.md`
+  per capability: `querying-with-confidence`, `ingesting-facts`,
+  `agent-to-agent-provenance`, `governance-labels`,
+  `action-invocation`, `time-travel-queries`,
+  `reviewing-pending-facts`. Drop-in for Claude Code.
+- **U. Chat-style playground.** New `POST /api/playground/chat`
+  SSE route runs a real Claude agent with the platform's MCP tools
+  registered. Frontend page at `/[workspace]/playground` shows the
+  chat on the left and the tool-call timeline on the right.
+- **V. MCP auth tightening.** Token rotation endpoint
+  (`POST /agent-tokens/:id/rotate`), in-memory per-token rate limit
+  on `/api/mcp/*` (default 60 req/min, override via
+  `MCP_RATE_LIMIT_RPM`). Token `last_used_at` is updated on every
+  successful verify.
+- **W. Live LLM end-to-end test.** New `@pytest.mark.live_llm`
+  marker; `backend/tests/test_scenario_live_llm.py` makes a real
+  Anthropic call (~$0.05) and asserts the resulting facts land.
+  CLI counterpart in `examples/01-claude-builds-kg.py`.
+- **X. Comparison docs.** `docs/comparison/` — README + per-vendor
+  long-form vs Zep, Mem0, LangChain Memory (Memori), Cognee. Honest
+  about our weaknesses (no SPARQL, no embedded RAG pipeline).
+- **Y. Production hardening.** Workspace deletion cascade test
+  (`test_workspace_cascade.py`), `/api/version` endpoint returning
+  git sha + schema version, CI workflow updated to exclude live_llm.
+- **Z. Final validation.** `pytest -m "not live_llm"` green;
+  ruff + mypy + web `pnpm check` green; cold-start smoke <60s.
 
 ## Phase N–Q additions (standards depth + agent-first surface)
 

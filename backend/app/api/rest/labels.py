@@ -50,7 +50,7 @@ class LabelAssignBody(BaseModel):
 async def list_(principal: CurrentPrincipal, session: DbSession) -> list[dict[str, Any]]:
     if not principal.workspace_id:
         raise HTTPException(400, "workspace required")
-    return [asdict(l) for l in await sens_mod.list_labels(
+    return [asdict(label) for label in await sens_mod.list_labels(
         session, workspace_id=principal.workspace_id
     )]
 

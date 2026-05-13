@@ -110,10 +110,7 @@ async def process_episode(
     )
     result.prov_activity_id = activity_id
 
-    # Stamp the episode itself with the activity that processed it. Useful
-    # when the source episode came from a connector (its own connector
-    # activity would already be in prov_activity_id) — we overwrite only
-    # when extraction is the primary producer of the entities it spawned.
+    # Stamp the episode itself with the activity that processed it.
     await session.execute(
         text(
             """
@@ -176,24 +173,6 @@ async def process_episode(
         # Refresh snapshot after creating types.
         snapshot = await ontology_mod.snapshot(session)
 
-    # P1: when the source episode is connector-backed, the extraction
-    # creates entities that should be findable on re-ingest via the
-    # Tier-1 external-ref short-circuit. We give every extracted entity
-    # an external_ref of ``(connector:KIND:file_id, EPISODE_EXTERNAL_ID)``
-    # so re-extracting the same source converges on the same entity.
-    #
-    # Caveat: a single file may legitimately mention multiple entities;
-    # in that case all of them share this ref. Tier-1 still wins on
-    # exact-canonical equality, so the worst case is the resolver
-    # returns the first-created entity for the file. The richer
-    # ``(email, slug, wikidata)`` refs come from extraction props below.
-    connector_ref: tuple[str, str] | None = None
-    if episode.get("connector_kind") and episode.get("external_id"):
-        connector_ref = (
-            f"connector:{episode['connector_kind']}:file_id",
-            episode["external_id"],
-        )
-
     async def _populate_external_refs(entity_id: str, props: dict[str, Any]) -> None:
         """Mirror well-known property keys onto entity_external_ref so
         Tier-1 resolution short-circuits next time we see the same
@@ -220,23 +199,6 @@ async def process_episode(
                         "extraction.external_ref_failed",
                         entity_id=entity_id, kind=kind, error=str(exc),
                     )
-        if connector_ref:
-            try:
-                await resolver_mod.add_external_ref(
-                    session,
-                    workspace_id=workspace_id,
-                    entity_id=entity_id,
-                    kind=connector_ref[0],
-                    value=connector_ref[1],
-                    source_ref=episode_id,
-                )
-            except Exception as exc:
-                log.warning(
-                    "extraction.external_ref_failed",
-                    entity_id=entity_id,
-                    kind=connector_ref[0],
-                    error=str(exc),
-                )
 
     # Step 2: resolve/create entities via the three-tier cascade.
     local_to_entity: dict[str, str] = {}
@@ -259,12 +221,6 @@ async def process_episode(
                 candidate_refs.append(
                     resolver_mod.ExternalRef(kind=kind, value=v.strip())
                 )
-        if connector_ref:
-            candidate_refs.append(
-                resolver_mod.ExternalRef(
-                    kind=connector_ref[0], value=connector_ref[1]
-                )
-            )
 
         candidate = resolver_mod.EntityCandidate(
             canonical=e.name,
@@ -544,13 +500,8 @@ async def _load_episode(session: AsyncSession, episode_id: str) -> dict[str, Any
             SELECT ep.id::text, ep.workspace_id::text, ep.source_kind,
                    ep.occurred_at::text,
                    ep.content, ep.content_text,
-                   ep.external_id AS external_id,
-                   ep.connector_instance_id::text AS connector_instance_id,
-                   ci.connector_kind AS connector_kind,
                    (ep.content_embedding IS NOT NULL) AS has_embedding
             FROM episode ep
-            LEFT JOIN connector_instance ci
-              ON ci.id = ep.connector_instance_id
             WHERE ep.id = :id
             """
         ),

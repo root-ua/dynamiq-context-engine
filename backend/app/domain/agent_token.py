@@ -163,6 +163,49 @@ async def revoke_token(
     return result.rowcount > 0
 
 
+async def rotate_token(
+    session: AsyncSession, *, workspace_id: str, token_id: str
+) -> CreatedToken | None:
+    """Revoke the existing token + mint a new one with the same name,
+    user, scopes, kind, and expiry. Returns the new token (plaintext
+    shown once) or None if the input token was already revoked / not
+    found. Use when the agent's secret has been exposed.
+    """
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT user_id::text, name, scopes, expires_at, kind
+                FROM agent_token
+                WHERE id = CAST(:id AS uuid)
+                  AND workspace_id = CAST(:ws AS uuid)
+                  AND revoked_at IS NULL
+                """
+            ),
+            {"id": token_id, "ws": workspace_id},
+        )
+    ).mappings().first()
+    if not row:
+        return None
+
+    await session.execute(
+        text(
+            "UPDATE agent_token SET revoked_at = now() "
+            "WHERE id = CAST(:id AS uuid)"
+        ),
+        {"id": token_id},
+    )
+    return await create_token(
+        session,
+        workspace_id=workspace_id,
+        user_id=row["user_id"],
+        name=row["name"],
+        kind=row["kind"],
+        scopes=list(row["scopes"] or []),
+        expires_at=row["expires_at"],
+    )
+
+
 @dataclass
 class VerifiedToken:
     workspace_id: str

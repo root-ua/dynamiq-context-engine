@@ -5,10 +5,9 @@ Decision-support shortcut. Each test invokes the tool through
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import text
 
 from app.api.mcp.tools import invoke_tool
 from app.auth.jwt import Principal
@@ -101,7 +100,7 @@ async def test_get_fact_as_of_returns_historical(two_people):
             subject_id=two_people["alice"], predicate="works_at",
             object_id=two_people["acme"],
             fact="Alice works at Acme",
-            valid_from=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            valid_from=datetime(2024, 1, 1, tzinfo=UTC),
             embed=False, run_contradictor=False,
         )
         globex = await entity_mod.create(
@@ -113,7 +112,7 @@ async def test_get_fact_as_of_returns_historical(two_people):
             subject_id=two_people["alice"], predicate="works_at",
             object_id=globex.id,
             fact="Alice works at Globex",
-            valid_from=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            valid_from=datetime(2025, 6, 1, tzinfo=UTC),
             embed=False, run_contradictor=False,
         )
         # as_of inside 2024 → Acme.

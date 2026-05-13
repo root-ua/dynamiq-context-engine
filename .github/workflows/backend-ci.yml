@@ -106,7 +106,7 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
         run: alembic upgrade head
 
-      - name: Pytest
+      - name: Pytest (excludes live_llm)
         env:
           POSTGRES_URL: postgresql+asyncpg://memory:memory@localhost:5432/memory
           POSTGRES_SYNC_URL: postgresql://memory:memory@localhost:5432/memory
@@ -115,4 +115,4 @@ jobs:
           ANTHROPIC_API_KEY: test
           OPENAI_API_KEY: test
           PUBLIC_BASE_URL: http://localhost:8000
-        run: pytest -v
+        run: pytest -v -m "not live_llm"

@@ -19,7 +19,6 @@ from app.domain import entity as entity_mod
 from app.domain.workspace import create_workspace
 from app.main import app
 
-
 pytestmark = pytest.mark.scenario
 
 

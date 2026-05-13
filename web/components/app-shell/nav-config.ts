@@ -1,6 +1,7 @@
 import {
   PiPulse,
   PiCalendarBlank,
+  PiChatsCircle,
   PiCheckSquareOffset,
   PiCpu,
   PiCubeTransparent,
@@ -8,10 +9,8 @@ import {
   PiGear,
   PiGraph,
   PiHouse,
-  PiKey,
   PiLightning,
   PiMagnifyingGlass,
-  PiPlugs,
   PiShapes,
 } from "react-icons/pi";
 
@@ -47,7 +46,6 @@ export function getNavGroups(workspaceSlug: string): NavGroup[] {
         },
         { href: `${base}/graph`, label: "Graph", icon: PiGraph },
         { href: `${base}/episodes`, label: "Episodes", icon: PiCalendarBlank },
-        { href: `${base}/sources`, label: "Sources", icon: PiPlugs },
       ],
     },
     {
@@ -74,9 +72,9 @@ export function getNavGroups(workspaceSlug: string): NavGroup[] {
       items: [
         { href: `${base}/agent`, label: "Agent console", icon: PiCpu },
         {
-          href: `${base}/settings/integrations`,
-          label: "Connect agents",
-          icon: PiKey,
+          href: `${base}/playground`,
+          label: "Playground",
+          icon: PiChatsCircle,
         },
         { href: `${base}/activity`, label: "Activity", icon: PiPulse },
       ],

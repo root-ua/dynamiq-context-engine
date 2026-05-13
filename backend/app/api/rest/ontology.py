@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException, Response
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import text
 
+from app.api.content_negotiation import accept_jsonld
 from app.api.rest.schemas import (
     EntityTypeCreate,
     EntityTypeOut,
@@ -19,6 +22,11 @@ from app.auth.deps import CurrentPrincipal, DbSession
 from app.domain import auto_ontology
 from app.domain import ontology as ontology_mod
 from app.domain.ontology import OntologyError
+from app.jsonld import (
+    BASE_CONTEXT,
+    to_jsonld_relation,
+    to_jsonld_type,
+)
 
 router = APIRouter(prefix="/ontology", tags=["ontology"])
 
@@ -28,8 +36,22 @@ router = APIRouter(prefix="/ontology", tags=["ontology"])
 # ---------------------------------------------------------------------------
 
 @router.get("/snapshot", response_model_by_alias=True)
-async def snapshot(_: CurrentPrincipal, session: DbSession) -> OntologySnapshotOut:
+async def snapshot(
+    _: CurrentPrincipal,
+    session: DbSession,
+    jsonld: Annotated[bool, Depends(accept_jsonld)] = False,
+) -> dict[str, Any] | OntologySnapshotOut:
     snap = await ontology_mod.snapshot(session)
+    if jsonld:
+        doc: dict[str, Any] = dict(BASE_CONTEXT)
+        doc["@graph"] = [
+            to_jsonld_type(t, snapshot=snap, embed_context=False)
+            for t in snap.types
+        ] + [
+            to_jsonld_relation(r, snapshot=snap, embed_context=False)
+            for r in snap.relations
+        ]
+        return doc
     return OntologySnapshotOut(
         types=[_type_out(t) for t in snap.types],
         relations=[_relation_out(r) for r in snap.relations],
@@ -41,8 +63,21 @@ async def snapshot(_: CurrentPrincipal, session: DbSession) -> OntologySnapshotO
 # ---------------------------------------------------------------------------
 
 @router.get("/types", response_model_by_alias=True)
-async def list_types(_: CurrentPrincipal, session: DbSession) -> list[EntityTypeOut]:
-    return [_type_out(t) for t in await ontology_mod.list_entity_types(session)]
+async def list_types(
+    _: CurrentPrincipal,
+    session: DbSession,
+    jsonld: Annotated[bool, Depends(accept_jsonld)] = False,
+) -> dict[str, Any] | list[EntityTypeOut]:
+    types = await ontology_mod.list_entity_types(session)
+    if jsonld:
+        snap = await ontology_mod.snapshot(session)
+        doc: dict[str, Any] = dict(BASE_CONTEXT)
+        doc["@graph"] = [
+            to_jsonld_type(t, snapshot=snap, embed_context=False)
+            for t in types
+        ]
+        return doc
+    return [_type_out(t) for t in types]
 
 
 @router.post("/types", status_code=201, response_model_by_alias=True)
@@ -69,10 +104,18 @@ async def create_type(
 
 
 @router.get("/types/{ref}", response_model_by_alias=True)
-async def get_type(ref: str, _: CurrentPrincipal, session: DbSession) -> EntityTypeOut:
+async def get_type(
+    ref: str,
+    _: CurrentPrincipal,
+    session: DbSession,
+    jsonld: Annotated[bool, Depends(accept_jsonld)] = False,
+) -> dict[str, Any] | EntityTypeOut:
     t = await ontology_mod.get_entity_type(session, ref)
     if not t:
         raise HTTPException(404, "entity type not found")
+    if jsonld:
+        snap = await ontology_mod.snapshot(session)
+        return to_jsonld_type(t, snapshot=snap)
     return _type_out(t)
 
 
@@ -117,8 +160,21 @@ async def delete_type(ref: str, _: CurrentPrincipal, session: DbSession):
 # ---------------------------------------------------------------------------
 
 @router.get("/relations")
-async def list_relations(_: CurrentPrincipal, session: DbSession) -> list[RelationTypeOut]:
-    return [_relation_out(r) for r in await ontology_mod.list_relation_types(session)]
+async def list_relations(
+    _: CurrentPrincipal,
+    session: DbSession,
+    jsonld: Annotated[bool, Depends(accept_jsonld)] = False,
+) -> dict[str, Any] | list[RelationTypeOut]:
+    relations = await ontology_mod.list_relation_types(session)
+    if jsonld:
+        snap = await ontology_mod.snapshot(session)
+        doc: dict[str, Any] = dict(BASE_CONTEXT)
+        doc["@graph"] = [
+            to_jsonld_relation(r, snapshot=snap, embed_context=False)
+            for r in relations
+        ]
+        return doc
+    return [_relation_out(r) for r in relations]
 
 
 @router.post("/relations", status_code=201)

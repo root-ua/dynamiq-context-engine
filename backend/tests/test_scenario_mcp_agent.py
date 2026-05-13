@@ -56,19 +56,20 @@ def _principal(
 # ---------------------------------------------------------------------------
 
 
-def test_tool_catalog_has_all_21_tools():
+def test_tool_catalog_has_all_22_tools():
     expected = {
         "search_memory", "get_entity", "graph_query",
         "add_fact", "invalidate_fact", "add_episode",
         "update_entity", "ontology_describe",
         "create_entity_type", "create_relation_type",
         "propose_ontology", "as_of_query",
-        "get_provenance", "list_proposals", "approve_proposal",
+        "get_provenance", "get_fact",
+        "list_proposals", "approve_proposal",
         "reject_proposal", "list_labels", "assign_label",
         "list_action_types", "execute_action", "list_action_invocations",
     }
     assert set(TOOLS_BY_NAME.keys()) == expected
-    assert len(TOOLS) == 21
+    assert len(TOOLS) == 22
 
 
 def test_every_tool_schema_is_valid_json_schema():
@@ -142,6 +143,9 @@ def _minimal_input_for(tool_name: str, ctx: dict) -> dict:
         return {"samples": [], "episode_ids": []}
     if tool_name == "as_of_query":
         return {"valid_at": "2025-01-01T00:00:00Z"}
+    if tool_name == "get_fact":
+        # member_of edge between alice and acme already exists in fixture.
+        return {"subject": ctx["alice"], "predicate": "member_of"}
     if tool_name == "get_provenance":
         return {"fact_id": ctx["edge_id"]}
     if tool_name == "list_proposals":

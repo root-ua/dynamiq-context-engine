@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from typing import Annotated, Any
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from app.api.content_negotiation import accept_jsonld
 from app.api.rest.schemas import EpisodeCreate, EpisodeOut
 from app.auth.deps import CurrentPrincipal, DbSession
 from app.domain import episode as episode_mod
+from app.jsonld import to_jsonld_episode
 from app.workers.queue import enqueue_extraction
 
 router = APIRouter(prefix="/episodes", tags=["episodes"])
@@ -54,10 +58,17 @@ async def create(
 
 
 @router.get("/{episode_id}")
-async def get(episode_id: str, _: CurrentPrincipal, session: DbSession) -> EpisodeOut:
+async def get(
+    episode_id: str,
+    _: CurrentPrincipal,
+    session: DbSession,
+    jsonld: Annotated[bool, Depends(accept_jsonld)] = False,
+) -> dict[str, Any] | EpisodeOut:
     ep = await episode_mod.get(session, episode_id)
     if not ep:
         raise HTTPException(404, "episode not found")
+    if jsonld:
+        return to_jsonld_episode(ep)
     return _to_out(ep)
 
 

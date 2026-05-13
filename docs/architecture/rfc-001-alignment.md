@@ -4,7 +4,7 @@ This document maps each load-bearing RFC-001 v3 section to the
 corresponding code in this repo. Rows are marked **implemented**,
 **partial**, **deferred**, or **out of scope** (explicit prior).
 
-Last updated: 2026-05-13 (Phase A–D + production-readiness pass F–H + TDD pass J–M)
+Last updated: 2026-05-13 (Phase A–D + production-readiness pass F–H + TDD pass J–M + standards/agent pass N–Q)
 
 ## Section-by-section
 
@@ -21,9 +21,69 @@ Last updated: 2026-05-13 (Phase A–D + production-readiness pass F–H + TDD pa
 | §17 | PROV-O provenance | **implemented** | `prov_activity` table; `app/domain/provenance.py` emits JSON-LD with `prov:` namespace; every extraction/contradiction/manual_edit attributes to one activity |
 | §18 | Hybrid retrieval | **implemented** | RRF over vector+FTS+trigram + 1-hop graph expand + MMR (`app/retrieval/hybrid.py`); cross-encoder rerank available behind `RERANKER_ENABLED` flag (`app/retrieval/rerank.py`) |
 | §19 | Kinetic actions | **implemented** | `action_type` + `action_invocation` tables; `app/domain/action.py` (idempotency, role gate, approval gate); first action: `attach_evidence_to_fact` |
-| §20 | MCP server | **implemented + verified** | 21 tools (`app/api/mcp/tools.py`); full happy-path matrix covered by `test_scenario_mcp_agent.py::test_mcp_tool_happy_path` (parametrized over every tool); end-to-end agent flows (provenance round-trip, ACL filter, approval workflow, action idempotency) in same file |
+| §20 | MCP server | **implemented + verified** | 22 tools (`app/api/mcp/tools.py`); full happy-path matrix covered by `test_scenario_mcp_agent.py::test_mcp_tool_happy_path` (parametrized over every tool); end-to-end agent flows (provenance round-trip, ACL filter, approval workflow, action idempotency, get_fact, agent-to-agent provenance) in same file + per-persona suites |
 | §22 | Audit log | **implemented** | `audit_log` table; every state-changing path writes a row |
 | §23 | Targets (100 QPS sustained) | **n/a** | Current single-node deploy. Kafka substrate explicitly deferred. |
+
+## Phase N–Q additions (standards depth + agent-first surface)
+
+Standards:
+- **N1–N5** — JSON-LD content negotiation across entity / edge /
+  episode / ontology / graph endpoints. `Accept: application/ld+json`
+  (or `?format=jsonld`) returns a JSON-LD doc with `@context` carrying
+  `prov:`, `owl:`, `rdfs:`, `skos:`, `xsd:`, and the Dynamiq-private
+  `dce:` namespace. Entity types render as `owl:Class` with
+  `rdfs:subClassOf`; relations as `owl:ObjectProperty` with
+  `rdfs:domain/range` and `owl:inverseOf`; canonical/aliases as
+  `skos:prefLabel/altLabel`; merged entities and external_refs surface
+  as `owl:sameAs`. No new triple store.
+
+Agent surface:
+- **O1** — `get_fact(subject, predicate, object?, as_of?,
+  require_min_confidence?)` MCP tool. Decision-support shortcut
+  returning one structured fact with `confidence`, `freshness_days`,
+  label slugs, and the PROV-O bundle attached. Returns `{multiple:
+  true, candidates: [...]}` when several values exist.
+- **O2** — `search_memory` hits now carry `payload.confidence`,
+  `payload.freshness_days`, `payload.label_slugs`, and
+  `payload.policy_warnings`. Single batched query, no N+1.
+- **O3** — `prov_activity_derivation` table + `link_derivation` /
+  `derivation_chain` helpers. `add_fact` / `add_episode` accept
+  `derived_from_activity_ids=[...]` so meta-agents can record
+  cross-agent `wasDerivedFrom` chains.
+
+Wiring (load-bearing):
+- **P1** — extraction now populates `entity_external_ref` with
+  connector file-id + extracted props (email/slug/wikidata). Tier-1 of
+  the entity resolver short-circuits on the second ingest.
+- **P2** — `attach_evidence_to_fact` action writes a
+  `prov_activity_derivation` row linking the action's activity to the
+  edge's original activity, so `get_provenance` walks the chain.
+- **P4** — source-recheck under `workspace.high_sensitivity` now fires
+  from `graph.traverse` and `edge.live_edges` / `history` too, not
+  just hybrid search.
+- **P5** — retrieval pipeline order corrected to: RRF → label-policy
+  filter → source-recheck → reranker → MMR.
+
+Persona scenarios (`@pytest.mark.scenario`):
+- **Q1** — mining agent: connector ingest + Tier-1 short-circuit.
+- **Q2** — meta-agent: agent A → agent B `wasDerivedFrom` chain.
+- **Q3** — functional CFO agent: `get_fact` with confidence, freshness,
+  min-confidence gate, payload enrichment in search.
+- **Q4** — governance chain: label drop for editor + high-sensitivity
+  recheck in graph traversal.
+- **Q5** — JSON-LD content negotiation across the read surface.
+- **Q6** — multi-agent contradiction: exactly one survivor when two
+  agents write conflicting high-stakes facts concurrently.
+
+Bonus correctness fixes uncovered while wiring O1:
+- Several `valid_time @> now()` clauses (in `edge.live_edges`,
+  `retrieval.graph`, `retrieval.hybrid`) switched to
+  `clock_timestamp()` so facts inserted in the same transaction are
+  visible to the search/get path immediately.
+
+Backend suite: **158 passed, 1 skipped** (was 135 at the end of the
+TDD pass; +23 from Phase N–Q).
 
 ## Phase J–M additions (TDD correctness + scenario coverage pass)
 

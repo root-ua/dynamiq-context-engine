@@ -76,9 +76,15 @@ async def search(
     if graph_expand and fused:
         fused = await _graph_expand(session, workspace_id, fused, limit=limit * 2, principal=principal)
 
-    # Label-policy filter (Phase B) — drops/warns based on sensitivity rules.
-    # Applied before MMR so diversity-rerank doesn't promote a result that
-    # then gets dropped.
+    # Pipeline order (Phase P5):
+    #   1. Label-policy filter — drop sensitive results before any
+    #      downstream work happens on them.
+    #   2. Source-recheck — drop revoked source rows in high-sens
+    #      workspaces.
+    #   3. Reranker — cross-encoder operates on the survivors only.
+    #   4. MMR — diversify within the final ranked set.
+
+    # 1. Label-policy filter.
     fused_dicts = [
         {"kind": h.kind, "id": h.id, "_hit": h}
         for h in fused
@@ -96,11 +102,30 @@ async def search(
             warned=summary["warned"],
             policies=summary["policies"],
         )
+    # Carry through any policy_warnings the apply_label_policy step
+    # stamped onto candidates so the final hit payload can expose them.
+    warnings_by_key: dict[tuple[str, str], list[str]] = {}
+    for c in kept:
+        if c.get("policy_warnings"):
+            warnings_by_key[(c["kind"], c["id"])] = list(c["policy_warnings"])
     fused = [c["_hit"] for c in kept]
 
-    # Optional cross-encoder rerank (RFC §18). Off by default; toggled via
-    # RERANKER_ENABLED. We feed the snippet/title text into a passage
-    # scorer, then re-sort the top-N.
+    # 2. Source-recheck (high-sensitivity workspaces only).
+    if principal is not None and fused:
+        ws_row = (
+            await session.execute(
+                text(
+                    "SELECT high_sensitivity FROM workspace WHERE id = :id"
+                ),
+                {"id": workspace_id},
+            )
+        ).first()
+        if ws_row and ws_row[0]:
+            fused = await _source_recheck_top_n(
+                session, workspace_id, fused, principal, n=5
+            )
+
+    # 3. Optional cross-encoder rerank (RFC §18).
     if settings.reranker_enabled and fused:
         from app.retrieval.rerank import rerank as _rerank
 
@@ -116,25 +141,163 @@ async def search(
         )
         fused = [s["_hit"] for s in scored]
 
-    # Source-recheck for high-sensitivity workspaces — verifies the top-N
-    # edge hits are still accessible to the principal in the source system.
-    if principal is not None and fused:
-        ws_row = (
+    # 4. MMR for diversity.
+    reranked = _mmr(fused, k=limit, lambda_=0.7)
+    final = reranked[:limit]
+
+    # Payload enrichment (Phase O2): batched lookup of edge confidence,
+    # freshness, and label slugs so agent callers don't have to follow up
+    # with separate ``get_provenance`` / ``labels_for`` calls.
+    if final:
+        await _enrich_payload(session, final, warnings_by_key)
+    return final
+
+
+async def _enrich_payload(
+    session: AsyncSession,
+    hits: list[SearchResult],
+    warnings_by_key: dict[tuple[str, str], list[str]],
+) -> None:
+    """One round-trip per kind: pull confidence + valid_from for edges,
+    plus label slugs for both edge and episode hits. Mutates each hit's
+    ``payload`` in place.
+    """
+    edge_ids = [h.id for h in hits if h.kind == "edge"]
+    episode_ids = [h.id for h in hits if h.kind == "episode"]
+
+    edge_meta: dict[str, dict[str, Any]] = {}
+    if edge_ids:
+        rows = (
             await session.execute(
                 text(
-                    "SELECT high_sensitivity FROM workspace WHERE id = :id"
+                    """
+                    SELECT id::text, confidence,
+                           EXTRACT(epoch FROM (clock_timestamp() - lower(valid_time))) / 86400
+                             AS freshness_days
+                    FROM edge
+                    WHERE id = ANY(:ids)
+                    """
                 ),
-                {"id": workspace_id},
+                {"ids": edge_ids},
             )
-        ).first()
-        if ws_row and ws_row[0]:
-            fused = await _source_recheck_top_n(
-                session, workspace_id, fused, principal, n=5
-            )
+        ).mappings().all()
+        for r in rows:
+            edge_meta[r["id"]] = {
+                "confidence": r["confidence"],
+                "freshness_days": (
+                    int(r["freshness_days"]) if r["freshness_days"] is not None else None
+                ),
+            }
 
-    # MMR for diversity.
-    reranked = _mmr(fused, k=limit, lambda_=0.7)
-    return reranked[:limit]
+    labels_by_target: dict[tuple[str, str], list[str]] = {}
+    if edge_ids:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT m.edge_id::text AS tid, sl.slug
+                    FROM edge_label m
+                    JOIN sensitivity_label sl ON sl.id = m.label_id
+                    WHERE m.edge_id = ANY(:ids)
+                    """
+                ),
+                {"ids": edge_ids},
+            )
+        ).mappings().all()
+        for r in rows:
+            labels_by_target.setdefault(("edge", r["tid"]), []).append(r["slug"])
+    if episode_ids:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT m.episode_id::text AS tid, sl.slug
+                    FROM episode_label m
+                    JOIN sensitivity_label sl ON sl.id = m.label_id
+                    WHERE m.episode_id = ANY(:ids)
+                    """
+                ),
+                {"ids": episode_ids},
+            )
+        ).mappings().all()
+        for r in rows:
+            labels_by_target.setdefault(("episode", r["tid"]), []).append(r["slug"])
+
+    for h in hits:
+        key = (h.kind, h.id)
+        if h.kind == "edge" and h.id in edge_meta:
+            h.payload.update(edge_meta[h.id])
+        labels = labels_by_target.get(key, [])
+        if labels:
+            h.payload["label_slugs"] = labels
+        warnings = warnings_by_key.get(key, [])
+        if warnings:
+            h.payload["policy_warnings"] = warnings
+
+
+async def recheck_edge_ids(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    edge_ids: list[str],
+    principal: Principal,
+) -> set[str]:
+    """Return the subset of ``edge_ids`` the principal can still read
+    according to the connector's live ``check_access`` call.
+
+    Admin / owner / service principals bypass the recheck (same shape as
+    ``edge_visibility_clause``). Edges with no connector-backed source
+    pass through unchanged.
+    """
+    if not edge_ids:
+        return set()
+    if principal.kind == "service" or principal.role in ("owner", "admin"):
+        return set(edge_ids)
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT e.id::text AS edge_id,
+                       ci.connector_kind AS connector_kind,
+                       ep.external_id AS external_ref
+                FROM edge e
+                LEFT JOIN episode ep ON ep.id = e.source_id
+                  AND e.source_kind = 'episode'
+                LEFT JOIN connector_instance ci ON ci.id = ep.connector_instance_id
+                WHERE e.id = ANY(:ids)
+                """
+            ),
+            {"ids": edge_ids},
+        )
+    ).mappings().all()
+    by_edge: dict[str, dict] = {r["edge_id"]: dict(r) for r in rows}
+
+    from app.connectors.registry import get_connector
+
+    allowed: set[str] = set()
+    for eid in edge_ids:
+        info = by_edge.get(eid)
+        if not info or not info.get("connector_kind") or not info.get("external_ref"):
+            allowed.add(eid)  # No connector backing → pass through.
+            continue
+        try:
+            connector = get_connector(info["connector_kind"])
+            ok = await connector.check_access(
+                session,
+                workspace_id=workspace_id,
+                principal_user_id=principal.user_id,
+                source_ref=info["external_ref"],
+            )
+        except Exception as exc:
+            log.warning(
+                "retrieval.source_recheck_failed",
+                edge_id=eid, kind=info.get("connector_kind"), error=str(exc),
+            )
+            allowed.add(eid)  # Transient error → fail open per ACL convention.
+            continue
+        if ok:
+            allowed.add(eid)
+    return allowed
 
 
 async def _source_recheck_top_n(
@@ -148,56 +311,22 @@ async def _source_recheck_top_n(
     """For each edge hit in the top-N, ask the connector whether the
     principal still has read access to the source. Revoked sources are
     dropped silently.
+
+    Built on top of ``recheck_edge_ids``; tails past N pass through
+    unchanged.
     """
     if principal.kind == "service" or principal.role in ("owner", "admin"):
         return hits
     edge_top = [h for h in hits[:n] if h.kind == "edge"]
     if not edge_top:
         return hits
-
-    rows = (
-        await session.execute(
-            text(
-                """
-                SELECT e.id::text AS edge_id, ep.id::text AS episode_id,
-                       ci.connector_kind AS connector_kind,
-                       ep.external_id AS external_ref
-                FROM edge e
-                LEFT JOIN episode ep ON ep.id = e.source_id
-                  AND e.source_kind = 'episode'
-                LEFT JOIN connector_instance ci ON ci.id = ep.connector_instance_id
-                WHERE e.id = ANY(:ids)
-                """
-            ),
-            {"ids": [h.id for h in edge_top]},
-        )
-    ).mappings().all()
-    by_edge: dict[str, dict] = {r["edge_id"]: dict(r) for r in rows}
-
-    from app.connectors.registry import get_connector
-
-    drop: set[str] = set()
-    for h in edge_top:
-        info = by_edge.get(h.id)
-        if not info or not info.get("connector_kind") or not info.get("external_ref"):
-            continue
-        try:
-            connector = get_connector(info["connector_kind"])
-            allowed = await connector.check_access(
-                session,
-                workspace_id=workspace_id,
-                principal_user_id=principal.user_id,
-                source_ref=info["external_ref"],
-            )
-        except Exception as exc:
-            log.warning(
-                "retrieval.source_recheck_failed",
-                edge_id=h.id, kind=info.get("connector_kind"), error=str(exc),
-            )
-            continue
-        if not allowed:
-            drop.add(h.id)
-
+    allowed = await recheck_edge_ids(
+        session,
+        workspace_id=workspace_id,
+        edge_ids=[h.id for h in edge_top],
+        principal=principal,
+    )
+    drop = {h.id for h in edge_top if h.id not in allowed}
     if not drop:
         return hits
     return [h for h in hits if not (h.kind == "edge" and h.id in drop)]
@@ -315,7 +444,7 @@ async def _edge_vector(
 ) -> list[SearchResult]:
     if embedding is None:
         return []
-    valid_clause = "e.valid_time @> now()" if not as_of_valid else "e.valid_time @> CAST(:vt AS timestamptz)"
+    valid_clause = "e.valid_time @> clock_timestamp()" if not as_of_valid else "e.valid_time @> CAST(:vt AS timestamptz)"
     params: dict[str, Any] = {
         "workspace_id": workspace_id,
         "embedding": to_pg_vector(embedding),
@@ -381,7 +510,7 @@ async def _edge_text(
     """
     if not query.strip():
         return []
-    valid_clause = "e.valid_time @> now()" if not as_of_valid else "e.valid_time @> CAST(:vt AS timestamptz)"
+    valid_clause = "e.valid_time @> clock_timestamp()" if not as_of_valid else "e.valid_time @> CAST(:vt AS timestamptz)"
     params: dict[str, Any] = {
         "workspace_id": workspace_id,
         "q": query,
@@ -654,7 +783,7 @@ async def _graph_expand(
             JOIN relation_type rt ON rt.id = e.predicate_id
             WHERE e.workspace_id = :workspace_id
               AND upper(e.sys_time) = 'infinity'
-              AND e.valid_time @> now()
+              AND e.valid_time @> clock_timestamp()
               AND (e.subject_id = ANY(:ids) OR e.object_id = ANY(:ids))
               {acl_filter}
             LIMIT :limit

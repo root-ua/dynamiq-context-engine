@@ -58,7 +58,14 @@ async def traverse(
     if not seeds or max_hops < 1:
         return Subgraph()
 
-    valid_clause = "e.valid_time @> now()" if not as_of_valid else "e.valid_time @> CAST(:vt AS timestamptz)"
+    # ``clock_timestamp()`` so a fact inserted earlier in the same
+    # transaction is visible — ``now()`` returns the transaction start
+    # time, which would silently exclude it.
+    valid_clause = (
+        "e.valid_time @> clock_timestamp()"
+        if not as_of_valid
+        else "e.valid_time @> CAST(:vt AS timestamptz)"
+    )
 
     match direction:
         case "out":
@@ -175,5 +182,28 @@ async def traverse(
         )
         for r in edge_rows.mappings()
     ]
+
+    # P4 — high-sensitivity workspaces re-verify edge access against the
+    # source connector. Same fail-closed-on-revoked behaviour as
+    # hybrid_search; admin/owner/service principals bypass.
+    if principal is not None and edges:
+        ws_row = (
+            await session.execute(
+                text(
+                    "SELECT high_sensitivity FROM workspace WHERE id = :id"
+                ),
+                {"id": workspace_id},
+            )
+        ).first()
+        if ws_row and ws_row[0]:
+            from app.retrieval.hybrid import recheck_edge_ids
+
+            allowed = await recheck_edge_ids(
+                session,
+                workspace_id=workspace_id,
+                edge_ids=[e.id for e in edges],
+                principal=principal,
+            )
+            edges = [e for e in edges if e.id in allowed]
 
     return Subgraph(nodes=nodes, edges=edges)

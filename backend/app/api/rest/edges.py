@@ -2,15 +2,19 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
+from app.api.content_negotiation import accept_jsonld
 from app.api.rest.schemas import EdgeCreate, EdgeInvalidate, EdgeOut
 from app.auth.deps import CurrentPrincipal, DbSession
 from app.domain import edge as edge_mod
+from app.domain import ontology as ontology_mod
 from app.domain.edge import EdgeError
 from app.domain.ontology import OntologyError
+from app.jsonld import to_jsonld_edge
 
 router = APIRouter(prefix="/edges", tags=["edges"])
 
@@ -72,10 +76,18 @@ async def create(
 
 
 @router.get("/{edge_id}")
-async def get(edge_id: str, principal: CurrentPrincipal, session: DbSession) -> EdgeOut:
+async def get(
+    edge_id: str,
+    principal: CurrentPrincipal,
+    session: DbSession,
+    jsonld: Annotated[bool, Depends(accept_jsonld)] = False,
+) -> dict[str, Any] | EdgeOut:
     edge = await edge_mod.get(session, edge_id, principal=principal)
     if not edge:
         raise HTTPException(404, "edge not found")
+    if jsonld:
+        snapshot = await ontology_mod.snapshot(session)
+        return to_jsonld_edge(edge, snapshot=snapshot)
     return EdgeOut(**asdict(edge))
 
 

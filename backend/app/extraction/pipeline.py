@@ -176,6 +176,68 @@ async def process_episode(
         # Refresh snapshot after creating types.
         snapshot = await ontology_mod.snapshot(session)
 
+    # P1: when the source episode is connector-backed, the extraction
+    # creates entities that should be findable on re-ingest via the
+    # Tier-1 external-ref short-circuit. We give every extracted entity
+    # an external_ref of ``(connector:KIND:file_id, EPISODE_EXTERNAL_ID)``
+    # so re-extracting the same source converges on the same entity.
+    #
+    # Caveat: a single file may legitimately mention multiple entities;
+    # in that case all of them share this ref. Tier-1 still wins on
+    # exact-canonical equality, so the worst case is the resolver
+    # returns the first-created entity for the file. The richer
+    # ``(email, slug, wikidata)`` refs come from extraction props below.
+    connector_ref: tuple[str, str] | None = None
+    if episode.get("connector_kind") and episode.get("external_id"):
+        connector_ref = (
+            f"connector:{episode['connector_kind']}:file_id",
+            episode["external_id"],
+        )
+
+    async def _populate_external_refs(entity_id: str, props: dict[str, Any]) -> None:
+        """Mirror well-known property keys onto entity_external_ref so
+        Tier-1 resolution short-circuits next time we see the same
+        identifier in another extraction.
+        """
+        for prop, kind in (
+            ("email", "email"),
+            ("slug", "slug"),
+            ("wikidata", "wikidata"),
+            ("wikidata_id", "wikidata"),
+        ):
+            value = props.get(prop)
+            if isinstance(value, str) and value.strip():
+                try:
+                    await resolver_mod.add_external_ref(
+                        session,
+                        workspace_id=workspace_id,
+                        entity_id=entity_id,
+                        kind=kind,
+                        value=value.strip(),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "extraction.external_ref_failed",
+                        entity_id=entity_id, kind=kind, error=str(exc),
+                    )
+        if connector_ref:
+            try:
+                await resolver_mod.add_external_ref(
+                    session,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    kind=connector_ref[0],
+                    value=connector_ref[1],
+                    source_ref=episode_id,
+                )
+            except Exception as exc:
+                log.warning(
+                    "extraction.external_ref_failed",
+                    entity_id=entity_id,
+                    kind=connector_ref[0],
+                    error=str(exc),
+                )
+
     # Step 2: resolve/create entities via the three-tier cascade.
     local_to_entity: dict[str, str] = {}
     for e in extracted.entities:
@@ -184,11 +246,32 @@ async def process_episode(
             result.errors.append(f"unknown type: {e.type_slug}")
             continue
 
+        # Extracted-prop external_refs feed Tier-1 of the resolver.
+        candidate_refs: list[resolver_mod.ExternalRef] = []
+        for prop, kind in (
+            ("email", "email"),
+            ("slug", "slug"),
+            ("wikidata", "wikidata"),
+            ("wikidata_id", "wikidata"),
+        ):
+            v = e.properties.get(prop) if isinstance(e.properties, dict) else None
+            if isinstance(v, str) and v.strip():
+                candidate_refs.append(
+                    resolver_mod.ExternalRef(kind=kind, value=v.strip())
+                )
+        if connector_ref:
+            candidate_refs.append(
+                resolver_mod.ExternalRef(
+                    kind=connector_ref[0], value=connector_ref[1]
+                )
+            )
+
         candidate = resolver_mod.EntityCandidate(
             canonical=e.name,
             type_slug=e.type_slug,
             summary=e.summary,
             aliases=list(e.aliases),
+            external_refs=candidate_refs,
         )
         resolution = await resolver_mod.resolve(
             session, workspace_id=workspace_id, candidate=candidate
@@ -216,6 +299,9 @@ async def process_episode(
                         ),
                         {"id": existing.id, "new": new_aliases},
                     )
+                # Make sure any newly-discovered external_refs are also
+                # attached to the matched entity (idempotent on conflict).
+                await _populate_external_refs(existing.id, e.properties or {})
                 continue
 
         # Resolver said "uncertain" — there's a plausible-but-not-confident
@@ -266,6 +352,7 @@ async def process_episode(
                     tier=resolution.tier,
                     score=resolution.score,
                 )
+                await _populate_external_refs(best.id, e.properties or {})
                 continue
 
         # Create new entity.
@@ -282,6 +369,7 @@ async def process_episode(
             )
             local_to_entity[e.local_id] = created.id
             result.created_entities.append(created.id)
+            await _populate_external_refs(created.id, e.properties or {})
         except Exception as exc:
             result.errors.append(f"entity {e.name}: {exc}")
 
@@ -453,10 +541,17 @@ async def _load_episode(session: AsyncSession, episode_id: str) -> dict[str, Any
     result = await session.execute(
         text(
             """
-            SELECT id::text, workspace_id::text, source_kind, occurred_at::text,
-                   content, content_text,
-                   (content_embedding IS NOT NULL) AS has_embedding
-            FROM episode WHERE id = :id
+            SELECT ep.id::text, ep.workspace_id::text, ep.source_kind,
+                   ep.occurred_at::text,
+                   ep.content, ep.content_text,
+                   ep.external_id AS external_id,
+                   ep.connector_instance_id::text AS connector_instance_id,
+                   ci.connector_kind AS connector_kind,
+                   (ep.content_embedding IS NOT NULL) AS has_embedding
+            FROM episode ep
+            LEFT JOIN connector_instance ci
+              ON ci.id = ep.connector_instance_id
+            WHERE ep.id = :id
             """
         ),
         {"id": episode_id},

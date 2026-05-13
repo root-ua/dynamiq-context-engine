@@ -198,7 +198,6 @@ async def test_approve_rejects_orphaned_source_episode(two_people):
     is now broken. The resulting edge has source_id pointing to a
     non-existent row, and the provenance chain quietly breaks.
     """
-    from uuid import uuid4
 
     from sqlalchemy import text
 

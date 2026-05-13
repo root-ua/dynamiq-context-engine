@@ -4,7 +4,6 @@ from __future__ import annotations
 import pytest
 
 from app.db.session import session_scope
-from app.domain import entity as entity_mod
 from app.domain import entity_resolver as resolver_mod
 
 

@@ -8,6 +8,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from app.api.mcp.server import router as mcp_router
+from app.api.middleware.rate_limit import MCPRateLimitMiddleware
 from app.api.rest import router as rest_router
 from app.api.websocket.events import router as ws_router
 from app.api.well_known import router as well_known_router
@@ -101,6 +102,7 @@ def create_app() -> FastAPI:
     )
 
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(MCPRateLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,

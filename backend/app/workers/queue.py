@@ -43,33 +43,6 @@ async def enqueue_ontology_proposal(
     return job.job_id if job else ""
 
 
-async def enqueue_crawl_initial(*, connector_instance_id: str) -> str:
-    queue = await get_queue()
-    job = await queue.enqueue_job(
-        "crawl_initial",
-        connector_instance_id=connector_instance_id,
-    )
-    return job.job_id if job else ""
-
-
-async def enqueue_crawl_incremental(*, connector_instance_id: str) -> str:
-    queue = await get_queue()
-    job = await queue.enqueue_job(
-        "crawl_incremental",
-        connector_instance_id=connector_instance_id,
-    )
-    return job.job_id if job else ""
-
-
-async def enqueue_refresh_acl(*, episode_id: str) -> str:
-    queue = await get_queue()
-    job = await queue.enqueue_job(
-        "refresh_acl",
-        episode_id=episode_id,
-    )
-    return job.job_id if job else ""
-
-
 async def enqueue_workspace_export(*, job_id: str, workspace_id: str) -> str:
     queue = await get_queue()
     job = await queue.enqueue_job(

@@ -4,7 +4,7 @@ Three tiers, each falling back to the next only when its verdict is
 indeterminate:
 
 1. **Rules.** Exact match via ``entity_external_ref`` (email, slug,
-   connector file-id, etc.) or canonical-name equality (citext).
+   wikidata id, etc.) or canonical-name equality (citext).
 2. **Trigram + semantic blocking.** Existing pg_trgm similarity inside
    the top-N nearest entities by ``summary_embedding``.
    * ``sim >= 0.9`` → MATCH.

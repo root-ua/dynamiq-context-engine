@@ -9,14 +9,14 @@ dependencies = [
   # Web
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",
-  "pydantic[email]>=2.9",
-  "pydantic-settings>=2.6",
+  "pydantic[email]>=2.11",
+  "pydantic-settings>=2.7",
   "python-multipart>=0.0.19",
 
   # DB
   "asyncpg>=0.30",
   "psycopg2-binary>=2.9",
-  "sqlalchemy[asyncio]>=2.0.35",
+  "sqlalchemy[asyncio]>=2.0.36",
   "alembic>=1.14",
   "pgvector>=0.3.6",
 
@@ -25,7 +25,8 @@ dependencies = [
   "argon2-cffi>=23.1",
 
   # LLM / embeddings
-  "litellm>=1.53",
+  "litellm>=1.61",
+  "anthropic>=0.42",
   "tiktoken>=0.8",
 
   # Jobs & cache
@@ -37,6 +38,9 @@ dependencies = [
 
   # MCP
   "mcp>=1.1",
+
+  # Playground (server-sent events for chat streaming)
+  "sse-starlette>=2.1",
 
   # Utility
   "httpx>=0.28",
@@ -102,5 +106,6 @@ asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 markers = [
-    "scenario: enterprise persona scenario tests (Phase K + L). Hit a real Postgres + Redis; slower than unit tests. Run with `pytest -m scenario`.",
+    "scenario: enterprise persona scenario tests. Hit a real Postgres + Redis; slower than unit tests. Run with `pytest -m scenario`.",
+    "live_llm: makes a real Anthropic API call. Opt-in only — CI runs `-m \"not live_llm\"`. Run with `pytest -m live_llm` after setting ANTHROPIC_API_KEY.",
 ]

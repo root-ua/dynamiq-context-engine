@@ -490,7 +490,7 @@ async def live_edges(
     params: dict[str, Any] = {"limit": limit}
 
     if at is None:
-        conditions.append("e.valid_time @> now()")
+        conditions.append("e.valid_time @> clock_timestamp()")
     else:
         conditions.append("e.valid_time @> CAST(:at AS timestamptz)")
         params["at"] = at

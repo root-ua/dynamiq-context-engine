@@ -5,7 +5,6 @@ import { useEffect } from "react";
 
 import { Sidebar } from "@/components/app-shell/Sidebar";
 import { Topbar } from "@/components/app-shell/Topbar";
-import { ConnectIdentityBanner } from "@/components/banners/ConnectIdentityBanner";
 import { useWorkspace } from "@/lib/workspace-context";
 
 export default function WorkspaceLayout({
@@ -48,7 +47,6 @@ export default function WorkspaceLayout({
       <Sidebar workspaceSlug={workspace.slug} />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar />
-        <ConnectIdentityBanner />
         <div className="min-h-0 flex-1 overflow-auto">{children}</div>
       </div>
     </div>

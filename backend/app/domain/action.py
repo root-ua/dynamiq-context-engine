@@ -579,12 +579,7 @@ async def _attach_evidence_to_fact(
     invocation: ActionInvocation,
     principal: Principal | None,
 ) -> dict[str, Any]:
-    """Append an evidence record to ``edge.props.evidence``.
-
-    Optionally posts a comment to the source Drive file via the connector
-    when the workspace has Drive write scope. The Drive write-back is
-    best-effort; failure is logged but doesn't fail the action.
-    """
+    """Append an evidence record to ``edge.props.evidence``."""
     edge_id = input["edge_id"]
     episode_id = input.get("episode_id")
     comment = input.get("comment", "")
@@ -633,15 +628,38 @@ async def _attach_evidence_to_fact(
         },
     )
 
-    # Optional Drive write-back. Disabled by default — full implementation
-    # depends on the Drive connector exposing a write scope. Stub the
-    # decision here so the test asserts the no-op path.
-    drive_comment_posted = False
+    # P2 — record a derivation link from the action's activity to the
+    # edge's original activity so ``get_provenance(edge_id)`` walks back
+    # through the action as ``wasDerivedFrom``. Without this, the
+    # action's mutation is only discoverable via the audit log.
+    upstream = (
+        await session.execute(
+            text(
+                "SELECT prov_activity_id::text FROM edge WHERE id = :id"
+            ),
+            {"id": edge_id},
+        )
+    ).scalar_one_or_none()
+    if upstream and invocation.prov_activity_id:
+        from app.domain import provenance as _prov
+
+        try:
+            await _prov.link_derivation(
+                session,
+                workspace_id=invocation.workspace_id,
+                derived_activity_id=invocation.prov_activity_id,
+                upstream_activity_id=upstream,
+                kind="revised",
+            )
+        except Exception as exc:
+            log.warning(
+                "action.derivation_link_failed",
+                edge_id=edge_id, error=str(exc),
+            )
 
     return {
         "edge_id": edge_id,
         "episode_id": episode_id,
-        "drive_comment_posted": drive_comment_posted,
     }
 
 

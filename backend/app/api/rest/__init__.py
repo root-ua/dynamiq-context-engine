@@ -5,7 +5,6 @@ from app.api.rest import (
     agent_tokens,
     audit,
     auth_sessions,
-    connectors,
     documents,
     edges,
     entities,
@@ -13,15 +12,14 @@ from app.api.rest import (
     exports,
     graph,
     health,
-    identity,
     labels,
     me,
     members,
     ontology,
+    playground,
     proposals,
     provenance,
     search,
-    sources,
     workspaces,
 )
 
@@ -45,6 +43,4 @@ router.include_router(labels.router)
 router.include_router(actions.router)
 router.include_router(exports.router)
 router.include_router(agent_tokens.router)
-router.include_router(connectors.router)
-router.include_router(identity.router)
-router.include_router(sources.router)
+router.include_router(playground.router)

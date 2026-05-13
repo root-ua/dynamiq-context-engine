@@ -110,10 +110,7 @@ async def process_episode(
     )
     result.prov_activity_id = activity_id
 
-    # Stamp the episode itself with the activity that processed it. Useful
-    # when the source episode came from a connector (its own connector
-    # activity would already be in prov_activity_id) — we overwrite only
-    # when extraction is the primary producer of the entities it spawned.
+    # Stamp the episode itself with the activity that processed it.
     await session.execute(
         text(
             """
@@ -176,6 +173,33 @@ async def process_episode(
         # Refresh snapshot after creating types.
         snapshot = await ontology_mod.snapshot(session)
 
+    async def _populate_external_refs(entity_id: str, props: dict[str, Any]) -> None:
+        """Mirror well-known property keys onto entity_external_ref so
+        Tier-1 resolution short-circuits next time we see the same
+        identifier in another extraction.
+        """
+        for prop, kind in (
+            ("email", "email"),
+            ("slug", "slug"),
+            ("wikidata", "wikidata"),
+            ("wikidata_id", "wikidata"),
+        ):
+            value = props.get(prop)
+            if isinstance(value, str) and value.strip():
+                try:
+                    await resolver_mod.add_external_ref(
+                        session,
+                        workspace_id=workspace_id,
+                        entity_id=entity_id,
+                        kind=kind,
+                        value=value.strip(),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "extraction.external_ref_failed",
+                        entity_id=entity_id, kind=kind, error=str(exc),
+                    )
+
     # Step 2: resolve/create entities via the three-tier cascade.
     local_to_entity: dict[str, str] = {}
     for e in extracted.entities:
@@ -184,11 +208,26 @@ async def process_episode(
             result.errors.append(f"unknown type: {e.type_slug}")
             continue
 
+        # Extracted-prop external_refs feed Tier-1 of the resolver.
+        candidate_refs: list[resolver_mod.ExternalRef] = []
+        for prop, kind in (
+            ("email", "email"),
+            ("slug", "slug"),
+            ("wikidata", "wikidata"),
+            ("wikidata_id", "wikidata"),
+        ):
+            v = e.properties.get(prop) if isinstance(e.properties, dict) else None
+            if isinstance(v, str) and v.strip():
+                candidate_refs.append(
+                    resolver_mod.ExternalRef(kind=kind, value=v.strip())
+                )
+
         candidate = resolver_mod.EntityCandidate(
             canonical=e.name,
             type_slug=e.type_slug,
             summary=e.summary,
             aliases=list(e.aliases),
+            external_refs=candidate_refs,
         )
         resolution = await resolver_mod.resolve(
             session, workspace_id=workspace_id, candidate=candidate
@@ -216,6 +255,9 @@ async def process_episode(
                         ),
                         {"id": existing.id, "new": new_aliases},
                     )
+                # Make sure any newly-discovered external_refs are also
+                # attached to the matched entity (idempotent on conflict).
+                await _populate_external_refs(existing.id, e.properties or {})
                 continue
 
         # Resolver said "uncertain" — there's a plausible-but-not-confident
@@ -266,6 +308,7 @@ async def process_episode(
                     tier=resolution.tier,
                     score=resolution.score,
                 )
+                await _populate_external_refs(best.id, e.properties or {})
                 continue
 
         # Create new entity.
@@ -282,6 +325,7 @@ async def process_episode(
             )
             local_to_entity[e.local_id] = created.id
             result.created_entities.append(created.id)
+            await _populate_external_refs(created.id, e.properties or {})
         except Exception as exc:
             result.errors.append(f"entity {e.name}: {exc}")
 
@@ -453,10 +497,12 @@ async def _load_episode(session: AsyncSession, episode_id: str) -> dict[str, Any
     result = await session.execute(
         text(
             """
-            SELECT id::text, workspace_id::text, source_kind, occurred_at::text,
-                   content, content_text,
-                   (content_embedding IS NOT NULL) AS has_embedding
-            FROM episode WHERE id = :id
+            SELECT ep.id::text, ep.workspace_id::text, ep.source_kind,
+                   ep.occurred_at::text,
+                   ep.content, ep.content_text,
+                   (ep.content_embedding IS NOT NULL) AS has_embedding
+            FROM episode ep
+            WHERE ep.id = :id
             """
         ),
         {"id": episode_id},

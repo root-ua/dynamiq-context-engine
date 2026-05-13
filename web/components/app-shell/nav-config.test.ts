@@ -21,7 +21,7 @@ describe("getNavGroups", () => {
     expect(hrefs).toContain("/acme/graph");
     expect(hrefs).toContain("/acme/ontology");
     expect(hrefs).toContain("/acme/agent");
-    expect(hrefs).toContain("/acme/settings/integrations");
+    expect(hrefs).toContain("/acme/playground");
     expect(hrefs).toContain("/acme/activity");
     expect(hrefs).toContain("/acme/search");
     expect(hrefs).toContain("/acme/episodes");

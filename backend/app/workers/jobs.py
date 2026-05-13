@@ -167,11 +167,6 @@ async def purge_old_audit_log(ctx: dict) -> dict[str, Any]:
 
 from arq import cron  # noqa: E402  (registered after job fns are defined)
 
-from app.workers.crawler import (  # noqa: E402
-    crawl_incremental,
-    crawl_initial,
-    refresh_acl,
-)
 from app.workers.export import (  # noqa: E402
     run_user_export,
     run_workspace_export,
@@ -182,9 +177,6 @@ class WorkerSettings:
     functions = [
         extract_episode,
         propose_and_apply_ontology,
-        crawl_initial,
-        crawl_incremental,
-        refresh_acl,
         run_workspace_export,
         run_user_export,
         purge_old_audit_log,

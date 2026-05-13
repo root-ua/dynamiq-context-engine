@@ -97,13 +97,6 @@ class Settings(BaseSettings):
         365, alias="AUDIT_LOG_RETENTION_DAYS"
     )
 
-    # Connectors — Notion (RFC §7 + alignment Phase G1).
-    notion_oauth_client_id: str | None = Field(None, alias="NOTION_OAUTH_CLIENT_ID")
-    notion_oauth_client_secret: str | None = Field(
-        None, alias="NOTION_OAUTH_CLIENT_SECRET"
-    )
-    mock_notion: bool = Field(False, alias="MOCK_NOTION")
-
     log_level: str = Field("INFO", alias="LOG_LEVEL")
 
     sentry_dsn: str | None = Field(None, alias="SENTRY_DSN")
@@ -122,24 +115,15 @@ class Settings(BaseSettings):
         "http://hocuspocus:1234", alias="COLLAB_INTERNAL_URL"
     )
 
-    # Symmetric key used by pgcrypto pgp_sym_encrypt to protect connector
-    # OAuth credentials at rest. Versioned via CONNECTOR_KEY_ID so we can
-    # rotate without re-encrypting everything in one transaction. If unset
-    # in dev, connectors won't be able to persist credentials — operator
-    # must set this before installing connectors.
-    connector_secret_key: str | None = Field(None, alias="CONNECTOR_SECRET_KEY")
-    connector_secret_key_id: str = Field("v1", alias="CONNECTOR_SECRET_KEY_ID")
+    # Playground (chat-style demo UI driving real Claude over our MCP).
+    playground_model: str = Field(
+        "claude-sonnet-4-6", alias="PLAYGROUND_MODEL"
+    )
 
-    # Google OAuth client for the Drive connector. Public client_id is
-    # safe to leak (Google requires it on the redirect URL); the secret
-    # must stay server-side. Both are workspace-global, not per-user.
-    google_oauth_client_id: str | None = Field(None, alias="GOOGLE_OAUTH_CLIENT_ID")
-    google_oauth_client_secret: str | None = Field(None, alias="GOOGLE_OAUTH_CLIENT_SECRET")
-
-    # When set, the Google Drive connector uses canned mock data instead
-    # of hitting Google APIs. Lets us exercise the full OAuth → crawl →
-    # ACL → query loop in tests and demos without real credentials.
-    mock_drive: bool = Field(False, alias="MOCK_DRIVE")
+    # In-memory rate limit on /api/mcp/* calls authenticated by an agent
+    # token. Session JWTs are not rate-limited here — the BetterAuth
+    # layer handles user sessions.
+    mcp_rate_limit_rpm: int = Field(60, alias="MCP_RATE_LIMIT_RPM")
 
     @property
     def cors_origins_list(self) -> list[str]:

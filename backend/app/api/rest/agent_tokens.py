@@ -98,3 +98,25 @@ async def revoke_agent_token(
     )
     if not ok:
         raise HTTPException(404, "token not found or already revoked")
+
+
+@router.post("/{token_id}/rotate", status_code=200)
+async def rotate_agent_token(
+    token_id: str,
+    principal: CurrentPrincipal,
+    session: DbSession,
+) -> TokenCreateOut:
+    """Revoke the existing token and mint a new one with the same name,
+    user, scopes, kind, and expiry. The plaintext is shown once."""
+    if not principal.workspace_id:
+        raise HTTPException(400, "workspace required")
+    if principal.claims.get("kind") == "agent_token":
+        raise HTTPException(403, "agent tokens cannot rotate themselves")
+    created = await tokens.rotate_token(
+        session,
+        workspace_id=principal.workspace_id,
+        token_id=token_id,
+    )
+    if not created:
+        raise HTTPException(404, "token not found or already revoked")
+    return TokenCreateOut(**asdict(created.row), token=created.token)

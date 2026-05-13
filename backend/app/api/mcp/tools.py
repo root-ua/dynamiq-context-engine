@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -74,6 +74,15 @@ class AddFactIn(BaseModel):
     valid_to: datetime | None = None
     confidence: float | None = None
     source_ref: str | None = None
+    derived_from_activity_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Cross-agent provenance. When this agent's fact was inferred "
+            "from another agent's prior activity (e.g. a meta-agent "
+            "reading traces), pass the upstream activity ids here. Each "
+            "is recorded as a prov:wasDerivedFrom link in get_provenance."
+        ),
+    )
 
 
 class InvalidateFactIn(BaseModel):
@@ -88,6 +97,14 @@ class AddEpisodeIn(BaseModel):
     source_ref: str | None = None
     occurred_at: datetime | None = None
     extract: bool = True
+    derived_from_activity_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Cross-agent provenance for episode ingestion. When a meta-agent "
+            "creates an episode from another agent's trace, pass the upstream "
+            "activity ids so the chain is queryable via get_provenance."
+        ),
+    )
 
 
 class UpdateEntityIn(BaseModel):
@@ -137,6 +154,25 @@ class AsOfIn(BaseModel):
     valid_at: datetime
     subject: str | None = None
     predicate: str | None = None
+
+
+class GetFactIn(BaseModel):
+    subject: str = Field(..., description="Entity id, IRI, or canonical name.")
+    predicate: str = Field(..., description="Relation slug or id.")
+    object: str | None = Field(
+        default=None,
+        description="Disambiguate when the subject has multiple values for this predicate.",
+    )
+    as_of: datetime | None = Field(
+        default=None,
+        description="Bi-temporal lookup: return the fact that was true at this point in valid-time.",
+    )
+    require_min_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Refuse the answer if the live edge's confidence is below this threshold.",
+    )
 
 
 class GetProvenanceIn(BaseModel):
@@ -260,8 +296,8 @@ async def _add_fact(
         return {"error": "subject or object not found"}
 
     # ``prov_activity.agent_kind`` is constrained to
-    # {'llm','user','system','connector'} — service-token callers map
-    # to 'system'; session-JWT callers map to 'user'.
+    # {'llm','user','system'} — service-token callers map to 'system';
+    # session-JWT callers map to 'user'.
     agent_kind = "system" if principal.kind == "service" else "user"
     activity_id = await prov_mod.start_activity(
         session,
@@ -276,6 +312,18 @@ async def _add_fact(
             "object": p.object,
         },
     )
+
+    # Cross-agent provenance: link this activity to every upstream
+    # activity the caller named so ``get_provenance`` walks the chain.
+    if p.derived_from_activity_ids:
+        for upstream_id in p.derived_from_activity_ids:
+            await prov_mod.link_derivation(
+                session,
+                workspace_id=workspace_id,
+                derived_activity_id=activity_id,
+                upstream_activity_id=upstream_id,
+                kind="derived",
+            )
 
     edge = None
     try:
@@ -324,8 +372,8 @@ async def _add_episode(
     principal: Principal,
 ) -> dict[str, Any]:
     # ``prov_activity.agent_kind`` is constrained to
-    # {'llm','user','system','connector'} — service-token callers map
-    # to 'system'; session-JWT callers map to 'user'.
+    # {'llm','user','system'} — service-token callers map to 'system';
+    # session-JWT callers map to 'user'.
     agent_kind = "system" if principal.kind == "service" else "user"
     activity_id = await prov_mod.start_activity(
         session,
@@ -335,6 +383,16 @@ async def _add_episode(
         agent_ref=actor_id,
         inputs={"tool": "add_episode", "source_kind": p.source_kind},
     )
+
+    if p.derived_from_activity_ids:
+        for upstream_id in p.derived_from_activity_ids:
+            await prov_mod.link_derivation(
+                session,
+                workspace_id=workspace_id,
+                derived_activity_id=activity_id,
+                upstream_activity_id=upstream_id,
+                kind="derived",
+            )
 
     ep = None
     try:
@@ -468,6 +526,131 @@ async def _get_provenance(session: AsyncSession, workspace_id: str, actor_id: st
     return doc
 
 
+async def _get_fact(
+    session: AsyncSession,
+    workspace_id: str,
+    actor_id: str | None,
+    p: GetFactIn,
+    principal: Principal,
+) -> dict[str, Any]:
+    """Decision-support shortcut for functional agents.
+
+    Returns ONE structured fact (subject + predicate) with confidence,
+    freshness, label slugs, and provenance attached. Replaces the
+    "search → filter → get_provenance" loop with a single call.
+    """
+    subject = await entity_mod.get(session, p.subject)
+    if not subject:
+        return {"error": "subject_not_found", "subject": p.subject}
+
+    relation = await ontology_mod.get_relation_type(session, p.predicate)
+    if not relation:
+        return {"error": "predicate_not_found", "predicate": p.predicate}
+
+    if p.as_of is not None:
+        rows = await edge_mod.as_of(
+            session,
+            valid_at=p.as_of,
+            subject_id=subject.id,
+            predicate=p.predicate,
+            principal=principal,
+        )
+    else:
+        rows = await edge_mod.live_edges(
+            session,
+            subject_id=subject.id,
+            predicate=p.predicate,
+            principal=principal,
+        )
+
+    if p.object is not None:
+        obj = await entity_mod.get(session, p.object)
+        if obj is None:
+            return {"error": "object_not_found", "object": p.object}
+        rows = [r for r in rows if r.object_id == obj.id]
+
+    if not rows:
+        return {"error": "no_fact"}
+
+    # When multiple live values exist (e.g. cardinality-many) and the
+    # caller didn't disambiguate via object=, return the list with a
+    # ``multiple`` flag so the agent can choose.
+    if len(rows) > 1 and p.object is None:
+        return {
+            "multiple": True,
+            "candidates": [
+                await _shape_fact(session, edge, principal=principal)
+                for edge in rows
+            ],
+        }
+
+    edge = rows[0]
+    if (
+        p.require_min_confidence is not None
+        and (edge.confidence is None
+             or edge.confidence < p.require_min_confidence)
+    ):
+        return {
+            "error": "below_min_confidence",
+            "confidence": edge.confidence,
+            "required": p.require_min_confidence,
+        }
+    return await _shape_fact(session, edge, principal=principal)
+
+
+async def _shape_fact(
+    session: AsyncSession,
+    edge: edge_mod.Edge,
+    *,
+    principal: Principal | None = None,
+) -> dict[str, Any]:
+    """Canonical agent-facing fact shape used by ``get_fact`` (and the
+    ``multiple`` candidate list)."""
+    subject = await entity_mod.get(session, edge.subject_id)
+    obj = await entity_mod.get(session, edge.object_id)
+    label_rows = await sens_mod.labels_for(
+        session, target_kind="edge", target_id=edge.id
+    )
+    label_slugs = [row.slug for row in label_rows]
+    provenance = await prov_mod.get_edge_provenance(session, edge.id)
+    # Freshness in days from now; for an open-ended edge use the
+    # ``valid_from`` lower bound.
+    try:
+        from datetime import datetime as _dt
+        vf = _dt.fromisoformat(edge.valid_from.replace(" ", "T"))
+        if vf.tzinfo is None:
+            vf = vf.replace(tzinfo=UTC)
+        freshness_days = max(
+            0, int((_dt.now(UTC) - vf).total_seconds() // 86400)
+        )
+    except Exception:
+        freshness_days = None
+    return {
+        "edge_id": edge.id,
+        "subject": (
+            {"id": subject.id, "canonical": subject.canonical}
+            if subject else {"id": edge.subject_id}
+        ),
+        "predicate": edge.predicate_slug,
+        "object": (
+            {"id": obj.id, "canonical": obj.canonical}
+            if obj else {"id": edge.object_id}
+        ),
+        "fact": edge.fact,
+        "confidence": edge.confidence,
+        "freshness_days": freshness_days,
+        "valid_from": edge.valid_from,
+        "valid_to": edge.valid_to,
+        "label_slugs": label_slugs,
+        "wasGeneratedBy": (
+            provenance.get("wasGeneratedBy") if provenance else None
+        ),
+        "wasDerivedFrom": (
+            provenance.get("wasDerivedFrom") if provenance else None
+        ),
+    }
+
+
 async def _list_proposals(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ListProposalsIn) -> dict[str, Any]:
     rows = await proposals_mod.list_proposals(
         session,
@@ -496,7 +679,7 @@ async def _approve_proposal(session: AsyncSession, workspace_id: str, actor_id: 
 
 async def _list_labels(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ListLabelsIn) -> dict[str, Any]:
     labels = await sens_mod.list_labels(session, workspace_id=workspace_id)
-    return {"labels": [asdict(l) for l in labels]}
+    return {"labels": [asdict(label) for label in labels]}
 
 
 async def _list_action_types(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ListActionTypesIn) -> dict[str, Any]:
@@ -601,7 +784,8 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(name="create_relation_type", description="Create a new relation type with domain/range constraints, cardinality, and temporal / symmetric / transitive / high-stakes flags.", input_schema=CreateRelationTypeIn, handler=_create_relation_type),
     ToolSpec(name="propose_ontology", description="Ask the LLM to propose an ontology (entity and relation types) from sample text or existing episodes. Optionally apply the proposal immediately.", input_schema=ProposeOntologyIn, handler=_propose_ontology),
     ToolSpec(name="as_of_query", description="Query edges as they were at a past valid time (bi-temporal as-of query).", input_schema=AsOfIn, handler=_as_of_query),
-    ToolSpec(name="get_provenance", description="Return W3C PROV-O JSON-LD for a fact (edge), including the activity that produced it, the agent (LLM / user / connector), and the source episode it was derived from.", input_schema=GetProvenanceIn, handler=_get_provenance),
+    ToolSpec(name="get_provenance", description="Return W3C PROV-O JSON-LD for a fact (edge), including the activity that produced it, the agent (LLM / user / system), and the source episode it was derived from.", input_schema=GetProvenanceIn, handler=_get_provenance),
+    ToolSpec(name="get_fact", description="Decision-support shortcut: return one structured fact for (subject, predicate) with confidence, freshness, label slugs, and provenance attached. Returns {error: 'no_fact'} when no live edge exists, or {multiple: true, candidates: [...]} when the subject has several values and ``object`` was not provided.", input_schema=GetFactIn, handler=_get_fact),
     ToolSpec(name="list_proposals", description="List facts in the review queue (pending / approved / rejected / superseded). Use this to surface low-confidence extractions that need human approval.", input_schema=ListProposalsIn, handler=_list_proposals),
     ToolSpec(name="approve_proposal", description="Approve a pending fact and promote it to a live edge. Reuses the same cardinality / contradictor invariants as direct fact insertion.", input_schema=ApproveProposalIn, handler=_approve_proposal),
     ToolSpec(name="reject_proposal", description="Reject a pending fact with a written reason. The proposal stays as audit evidence; no edge is created.", input_schema=RejectProposalIn, handler=_reject_proposal),

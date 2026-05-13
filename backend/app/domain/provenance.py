@@ -45,7 +45,7 @@ PROV_CONTEXT: dict[str, Any] = {
 
 
 ActivityKind = str  # 'extraction'|'contradiction'|'manual_edit'|'merge'|'action'|'seed'|'approval'
-AgentKind = str  # 'llm'|'user'|'system'|'connector'
+AgentKind = str  # 'llm'|'user'|'system'
 
 
 @dataclass
@@ -161,6 +161,99 @@ async def get_activity(session: AsyncSession, activity_id: str) -> Activity | No
     )
 
 
+async def link_derivation(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    derived_activity_id: str,
+    upstream_activity_id: str,
+    kind: str = "derived",
+) -> None:
+    """Record that ``derived_activity_id`` reused / revised / quoted
+    ``upstream_activity_id``.
+
+    Idempotent: the unique constraint on (derived, upstream) makes
+    repeat calls no-ops.
+    """
+    if derived_activity_id == upstream_activity_id:
+        raise ValueError("an activity cannot derive from itself")
+    if kind not in {"derived", "revised", "quoted"}:
+        raise ValueError(f"invalid derivation_kind: {kind}")
+    await session.execute(
+        text(
+            """
+            INSERT INTO prov_activity_derivation
+              (workspace_id, derived_activity_id, upstream_activity_id,
+               derivation_kind)
+            VALUES (:ws, :d, :u, :k)
+            ON CONFLICT DO NOTHING
+            """
+        ),
+        {
+            "ws": workspace_id,
+            "d": derived_activity_id,
+            "u": upstream_activity_id,
+            "k": kind,
+        },
+    )
+
+
+async def derivation_chain(
+    session: AsyncSession,
+    activity_id: str,
+    *,
+    max_depth: int = 10,
+) -> list[Activity]:
+    """Return the upstream chain reachable from ``activity_id``.
+
+    Order: closest-upstream-first. The recursion is depth-bounded as
+    a belt-and-braces; the CHECK constraint already forbids self-loops.
+    """
+    rows = (
+        await session.execute(
+            text(
+                """
+                WITH RECURSIVE walk AS (
+                  SELECT pad.upstream_activity_id AS id, 1 AS depth
+                  FROM prov_activity_derivation pad
+                  WHERE pad.derived_activity_id = :start
+                  UNION
+                  SELECT pad.upstream_activity_id, w.depth + 1
+                  FROM prov_activity_derivation pad
+                  JOIN walk w ON w.id = pad.derived_activity_id
+                  WHERE w.depth < :max_depth
+                )
+                SELECT pa.id::text, pa.workspace_id::text, pa.kind,
+                       pa.agent_kind, pa.agent_ref, pa.agent_version,
+                       pa.inputs, pa.outputs,
+                       pa.started_at::text, pa.ended_at::text,
+                       pa.audit_log_id
+                FROM walk w
+                JOIN prov_activity pa ON pa.id = w.id
+                ORDER BY w.depth
+                """
+            ),
+            {"start": activity_id, "max_depth": max_depth},
+        )
+    ).mappings().all()
+    return [
+        Activity(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            kind=row["kind"],
+            agent_kind=row["agent_kind"],
+            agent_ref=row["agent_ref"],
+            agent_version=row["agent_version"],
+            inputs=row["inputs"] or {},
+            outputs=row["outputs"] or {},
+            started_at=row["started_at"],
+            ended_at=row["ended_at"],
+            audit_log_id=row["audit_log_id"],
+        )
+        for row in rows
+    ]
+
+
 async def get_edge_provenance(
     session: AsyncSession, edge_id: str
 ) -> dict[str, Any] | None:
@@ -190,7 +283,6 @@ async def get_edge_provenance(
                   a.ended_at::text AS activity_ended_at,
                   ep.id::text AS episode_id,
                   LEFT(COALESCE(ep.content_text, ''), 200) AS episode_snippet,
-                  ep.external_url AS episode_url,
                   ep.source_kind AS episode_source_kind
                 FROM edge e
                 LEFT JOIN prov_activity a ON a.id = e.prov_activity_id
@@ -232,14 +324,46 @@ async def get_edge_provenance(
             activity_node["endedAtTime"] = row["activity_ended_at"]
         doc["wasGeneratedBy"] = activity_node
         doc["wasAttributedTo"] = agent_node
+    derived_nodes: list[dict[str, Any]] = []
     if row["episode_id"]:
-        doc["wasDerivedFrom"] = {
-            "@id": f"dce:episode/{row['episode_id']}",
-            "@type": ["Entity", "dce:Episode"],
-            "dce:snippet": row["episode_snippet"],
-            "dce:sourceKind": row["episode_source_kind"],
-            "dce:externalUrl": row["episode_url"],
-        }
+        derived_nodes.append(
+            {
+                "@id": f"dce:episode/{row['episode_id']}",
+                "@type": ["Entity", "dce:Episode"],
+                "dce:snippet": row["episode_snippet"],
+                "dce:sourceKind": row["episode_source_kind"],
+            }
+        )
+
+    # Agent-to-agent derivations (Phase O3): if this edge's activity
+    # was informed by other activities, surface them as additional
+    # ``wasDerivedFrom`` nodes so the chain is one query away for the
+    # agent caller.
+    if row["activity_id"]:
+        upstream = await derivation_chain(session, row["activity_id"])
+        for act in upstream:
+            derived_nodes.append(
+                {
+                    "@id": f"dce:activity/{act.id}",
+                    "@type": "Activity",
+                    "dce:kind": act.kind,
+                    "wasAssociatedWith": {
+                        "@id": (
+                            f"dce:agent/{act.agent_kind}/"
+                            f"{act.agent_ref or 'unknown'}"
+                        ),
+                        "@type": "Agent",
+                        "dce:agentKind": act.agent_kind,
+                        **({"dce:agentRef": act.agent_ref}
+                           if act.agent_ref else {}),
+                    },
+                }
+            )
+
+    if len(derived_nodes) == 1:
+        doc["wasDerivedFrom"] = derived_nodes[0]
+    elif derived_nodes:
+        doc["wasDerivedFrom"] = derived_nodes
     return doc
 
 
@@ -253,19 +377,15 @@ async def get_episode_provenance(
                 SELECT
                   ep.id::text AS episode_id,
                   LEFT(COALESCE(ep.content_text, ''), 200) AS snippet,
-                  ep.external_url,
                   ep.source_kind,
                   ep.ingested_at::text AS ingested_at,
                   a.id::text AS activity_id,
                   a.kind AS activity_kind,
                   a.agent_kind, a.agent_ref, a.agent_version,
                   a.started_at::text AS activity_started_at,
-                  a.ended_at::text AS activity_ended_at,
-                  ep.connector_instance_id::text AS connector_id,
-                  ci.connector_kind
+                  a.ended_at::text AS activity_ended_at
                 FROM episode ep
                 LEFT JOIN prov_activity a ON a.id = ep.prov_activity_id
-                LEFT JOIN connector_instance ci ON ci.id = ep.connector_instance_id
                 WHERE ep.id = :id
                 """
             ),
@@ -281,7 +401,6 @@ async def get_episode_provenance(
     doc["@type"] = ["Entity", "dce:Episode"]
     doc["dce:snippet"] = row["snippet"]
     doc["dce:sourceKind"] = row["source_kind"]
-    doc["dce:externalUrl"] = row["external_url"]
     if row["activity_id"]:
         agent_node: dict[str, Any] = {
             "@id": f"dce:agent/{row['agent_kind']}/{row['agent_ref'] or 'unknown'}",
@@ -301,10 +420,4 @@ async def get_episode_provenance(
         if row["activity_ended_at"]:
             activity_node["endedAtTime"] = row["activity_ended_at"]
         doc["wasGeneratedBy"] = activity_node
-    if row["connector_id"]:
-        doc["dce:fromConnector"] = {
-            "@id": f"dce:connector/{row['connector_id']}",
-            "@type": "Agent",
-            "dce:connectorKind": row["connector_kind"],
-        }
     return doc

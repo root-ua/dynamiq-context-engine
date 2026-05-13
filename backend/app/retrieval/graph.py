@@ -58,7 +58,14 @@ async def traverse(
     if not seeds or max_hops < 1:
         return Subgraph()
 
-    valid_clause = "e.valid_time @> now()" if not as_of_valid else "e.valid_time @> CAST(:vt AS timestamptz)"
+    # ``clock_timestamp()`` so a fact inserted earlier in the same
+    # transaction is visible — ``now()`` returns the transaction start
+    # time, which would silently exclude it.
+    valid_clause = (
+        "e.valid_time @> clock_timestamp()"
+        if not as_of_valid
+        else "e.valid_time @> CAST(:vt AS timestamptz)"
+    )
 
     match direction:
         case "out":
@@ -175,5 +182,4 @@ async def traverse(
         )
         for r in edge_rows.mappings()
     ]
-
     return Subgraph(nodes=nodes, edges=edges)

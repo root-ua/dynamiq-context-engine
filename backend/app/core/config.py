@@ -75,6 +75,35 @@ class Settings(BaseSettings):
     hybrid_rrf_k: int = Field(60, alias="HYBRID_RRF_K")
     search_default_limit: int = Field(20, alias="SEARCH_DEFAULT_LIMIT")
 
+    # Cross-encoder reranker (RFC §18). Off by default. When on, the
+    # ``reranker_model`` is invoked once per query against the top hits
+    # before MMR diversification.
+    reranker_enabled: bool = Field(False, alias="RERANKER_ENABLED")
+    reranker_model: str = Field(
+        "cross-encoder/ms-marco-MiniLM-L-6-v2", alias="RERANKER_MODEL"
+    )
+    reranker_top_n: int = Field(30, alias="RERANKER_TOP_N")
+
+    # Entity-resolution tier-3 LLM (RFC §16). Cheap-model default.
+    entity_resolver_llm_model: str = Field(
+        "claude-haiku-4-5", alias="ENTITY_RESOLVER_LLM_MODEL"
+    )
+
+    # Workers
+    worker_drain_seconds: int = Field(30, alias="WORKER_DRAIN_SECONDS")
+
+    # Audit-log retention. 0 disables purging entirely.
+    audit_log_retention_days: int = Field(
+        365, alias="AUDIT_LOG_RETENTION_DAYS"
+    )
+
+    # Connectors — Notion (RFC §7 + alignment Phase G1).
+    notion_oauth_client_id: str | None = Field(None, alias="NOTION_OAUTH_CLIENT_ID")
+    notion_oauth_client_secret: str | None = Field(
+        None, alias="NOTION_OAUTH_CLIENT_SECRET"
+    )
+    mock_notion: bool = Field(False, alias="MOCK_NOTION")
+
     log_level: str = Field("INFO", alias="LOG_LEVEL")
 
     sentry_dsn: str | None = Field(None, alias="SENTRY_DSN")

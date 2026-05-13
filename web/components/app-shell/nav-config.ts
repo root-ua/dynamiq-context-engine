@@ -1,6 +1,7 @@
 import {
   PiPulse,
   PiCalendarBlank,
+  PiCheckSquareOffset,
   PiCpu,
   PiCubeTransparent,
   PiFileText,
@@ -8,6 +9,7 @@ import {
   PiGraph,
   PiHouse,
   PiKey,
+  PiLightning,
   PiMagnifyingGlass,
   PiPlugs,
   PiShapes,
@@ -51,6 +53,21 @@ export function getNavGroups(workspaceSlug: string): NavGroup[] {
     {
       label: "Schema",
       items: [{ href: `${base}/ontology`, label: "Ontology", icon: PiShapes }],
+    },
+    {
+      label: "Governance",
+      items: [
+        {
+          href: `${base}/review`,
+          label: "Review queue",
+          icon: PiCheckSquareOffset,
+        },
+        {
+          href: `${base}/actions`,
+          label: "Actions",
+          icon: PiLightning,
+        },
+      ],
     },
     {
       label: "Agents",

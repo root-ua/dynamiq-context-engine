@@ -143,6 +143,27 @@ If a migration needs manual attention, set `autoDeploy: false` on the backend se
 1. Render → service → Deploys → pick the previous good deploy → Rollback.
 2. If the rollback spans a migration, you need to run `alembic downgrade -1` **first** from Render shell, then rollback. The `downgrade()` function is defined in every migration in this repo.
 
+## RFC-001 alignment env vars
+
+Added in the Phase A–H passes. All have sensible defaults; override
+only if you need to tighten or relax the defaults.
+
+| Var | Default | What it controls |
+|---|---|---|
+| `DEFAULT_EXTRACTION_THRESHOLD` | `0.7` | Per-class `min_confidence` for new workspaces. Facts below this confidence land in `/review` instead of going live. |
+| `DEFAULT_AUTO_REJECT_BELOW` | `0.3` | Anything strictly below this is recorded as `pending_fact(status='rejected')` for audit, never enqueued. |
+| `ENTITY_RESOLVER_LLM_MODEL` | `claude-haiku-4-5` | Cheap judge for the tier-3 entity-resolution cascade. |
+| `RERANKER_ENABLED` | `false` | Master switch on the cross-encoder rerank stage in hybrid retrieval. Adds latency and an extra dep (sentence-transformers) — turn on when you have the budget. |
+| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model id used when `RERANKER_ENABLED=true`. |
+| `RERANKER_TOP_N` | `30` | How many top fused candidates pass through the reranker before MMR. |
+| `AUDIT_LOG_RETENTION_DAYS` | `365` | Daily cron purges `audit_log` rows older than this. Set to `0` to disable. |
+| `WORKER_DRAIN_SECONDS` | `30` | Cap on graceful drain after SIGTERM; the Arq worker exits hard after this. |
+| `NOTION_OAUTH_CLIENT_ID` / `NOTION_OAUTH_CLIENT_SECRET` | unset | Required for the real-mode Notion connector. Set `MOCK_NOTION=1` for development. |
+| `MOCK_NOTION` | `false` | Use deterministic mock pages instead of the Notion API. |
+
+See `docs/architecture/rfc-001-alignment.md` for the full per-section
+status table.
+
 ## Cost floor (Starter plans, as of 2026)
 
 - Postgres Starter: ~$7/mo

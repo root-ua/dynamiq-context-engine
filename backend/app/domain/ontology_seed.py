@@ -5,6 +5,7 @@ and relations to match the YAML.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -16,13 +17,30 @@ from app.core.logging import get_logger
 
 log = get_logger(__name__)
 
-DEFAULT_SEED_PATH = Path("/seeds/ontology.yaml")
+# Default to the path baked into the Docker image; allow override for
+# host-side test runs via ONTOLOGY_SEED_PATH.
+DEFAULT_SEED_PATH = Path(os.environ.get("ONTOLOGY_SEED_PATH", "/seeds/ontology.yaml"))
+
+
+def _candidate_paths(path: Path | None) -> list[Path]:
+    """Try the explicit/env-configured path first, then walk up from this file
+    until we find a ``seeds/ontology.yaml`` neighbour. Lets tests work without
+    setting ONTOLOGY_SEED_PATH manually.
+    """
+    candidates = [path] if path else [DEFAULT_SEED_PATH]
+    here = Path(__file__).resolve()
+    for ancestor in here.parents:
+        candidates.append(ancestor / "seeds" / "ontology.yaml")
+    return [c for c in candidates if c]
 
 
 def load_seed(path: Path | None = None) -> dict[str, Any]:
-    seed_path = path or DEFAULT_SEED_PATH
-    if not seed_path.exists():
-        raise FileNotFoundError(f"ontology seed not found at {seed_path}")
+    for candidate in _candidate_paths(path):
+        if candidate.exists():
+            seed_path = candidate
+            break
+    else:
+        raise FileNotFoundError(f"ontology seed not found at {DEFAULT_SEED_PATH}")
     with seed_path.open() as f:
         data = yaml.safe_load(f)
     assert "types" in data and "relations" in data, "seed missing types/relations"

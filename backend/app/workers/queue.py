@@ -68,3 +68,23 @@ async def enqueue_refresh_acl(*, episode_id: str) -> str:
         episode_id=episode_id,
     )
     return job.job_id if job else ""
+
+
+async def enqueue_workspace_export(*, job_id: str, workspace_id: str) -> str:
+    queue = await get_queue()
+    job = await queue.enqueue_job(
+        "run_workspace_export",
+        job_id=job_id,
+        workspace_id=workspace_id,
+    )
+    return job.job_id if job else ""
+
+
+async def enqueue_user_export(*, job_id: str, user_id: str) -> str:
+    queue = await get_queue()
+    job = await queue.enqueue_job(
+        "run_user_export",
+        job_id=job_id,
+        user_id=user_id,
+    )
+    return job.job_id if job else ""

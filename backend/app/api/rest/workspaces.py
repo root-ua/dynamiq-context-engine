@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response
-from sqlalchemy import text
-
 from dataclasses import asdict
 
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 from app.api.rest.schemas import (
     WorkspaceCreate,
@@ -216,6 +215,13 @@ async def update_workspace(
                 """
             ),
             {"id": workspace_id, "mode": payload.ontology_mode},
+        )
+    if payload.high_sensitivity is not None:
+        await session.execute(
+            text(
+                "UPDATE workspace SET high_sensitivity = :flag WHERE id = :id"
+            ),
+            {"id": workspace_id, "flag": payload.high_sensitivity},
         )
 
     result = await session.execute(

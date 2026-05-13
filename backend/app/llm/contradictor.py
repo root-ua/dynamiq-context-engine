@@ -97,11 +97,15 @@ async def run(
         if judgment.verdict != "contradicts":
             continue
 
+        # ``clock_timestamp()`` not ``now()`` — when the contradictor
+        # runs in the same transaction as the new edge insert, ``now()``
+        # returns the transaction start time which is BEFORE the new
+        # edge's valid_from, breaking the sys_time closure ordering.
         await session.execute(
             text(
                 """
                 UPDATE edge
-                SET sys_time = tstzrange(lower(sys_time), now(), '[)'),
+                SET sys_time = tstzrange(lower(sys_time), clock_timestamp(), '[)'),
                     valid_time = tstzrange(lower(valid_time), :vt_close, '[)')
                 WHERE id = :id AND upper(sys_time) = 'infinity'
                 """

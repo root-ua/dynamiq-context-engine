@@ -8,7 +8,6 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # Value types
 # ---------------------------------------------------------------------------
@@ -214,3 +213,24 @@ class CrawlerConnector(ABC):
         raise NotImplementedError(
             f"{self.kind} connector does not support targeted ACL refresh"
         )
+
+    # ------------------------------------------------------------------
+    # Live-access check (high-sensitivity tenants, RFC §11.5)
+    # ------------------------------------------------------------------
+
+    async def check_access(
+        self,
+        session: Any,
+        *,
+        workspace_id: str,
+        principal_user_id: str,
+        source_ref: str,
+    ) -> bool:
+        """Verify the principal still has read access to ``source_ref``.
+
+        Default permits access — only connectors implementing source-side
+        impersonation should override. Implementations should return
+        ``True`` on transient failures (caller treats this as best-effort
+        belt-and-braces over the snapshot ACL).
+        """
+        return True

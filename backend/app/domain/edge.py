@@ -86,6 +86,7 @@ async def add_fact(
     created_by: str | None = None,
     embed: bool = True,
     run_contradictor: bool = True,
+    prov_activity_id: str | None = None,
 ) -> Edge:
     """Insert a new edge, running the contradictor when required.
 
@@ -148,13 +149,13 @@ async def add_fact(
               id, workspace_id, subject_id, predicate_id, object_id,
               fact, fact_embedding, props,
               valid_time, sys_time,
-              source_id, source_kind, confidence, created_by
+              source_id, source_kind, confidence, created_by, prov_activity_id
             ) VALUES (
               :id, :workspace_id, :subject_id, :predicate_id, :object_id,
               :fact, CAST(:fact_embedding AS vector), CAST(:props AS jsonb),
               tstzrange(:vt_from, COALESCE(:vt_to, 'infinity'::timestamptz), '[)'),
               tstzrange(clock_timestamp(), 'infinity'::timestamptz, '[)'),
-              :source_id, :source_kind, :confidence, :created_by
+              :source_id, :source_kind, :confidence, :created_by, :prov_activity_id
             )
             """
         ),
@@ -173,6 +174,7 @@ async def add_fact(
             "source_kind": source_kind,
             "confidence": confidence,
             "created_by": created_by,
+            "prov_activity_id": prov_activity_id,
         },
     )
 
@@ -204,6 +206,177 @@ async def add_fact(
     edge = await get(session, edge_id)
     assert edge is not None
     return edge
+
+
+async def propose_fact(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    subject_id: str,
+    predicate: str,
+    object_id: str,
+    fact: str | None = None,
+    props: dict[str, Any] | None = None,
+    valid_from: datetime | None = None,
+    valid_to: datetime | None = None,
+    source_id: str | None = None,
+    source_kind: str | None = None,
+    confidence: float,
+    created_by: str | None = None,
+    prov_activity_id: str | None = None,
+) -> FactWriteResult:
+    """Threshold-aware fact write.
+
+    Used by the extraction pipeline (and any other automated producer)
+    instead of :func:`add_fact`. Consults ``extraction_policy`` and routes
+    the fact to ``edge`` directly, to ``pending_fact(status='pending')``
+    for human review, or to ``pending_fact(status='rejected')`` if
+    confidence is below the workspace's auto-reject floor.
+    """
+    # Lazy import to avoid module-level circularity with proposals.
+    from app.domain import proposals as proposals_mod
+
+    relation = await ontology_mod.get_relation_type(session, predicate)
+    if not relation:
+        raise OntologyError(f"relation type not found: {predicate}")
+
+    sub_type, obj_type = await _subject_object_types(session, subject_id, object_id)
+    if not sub_type or not obj_type:
+        raise EdgeError("subject or object entity not found")
+
+    await ontology_mod.validate_edge(
+        session,
+        relation=relation,
+        subject_type_id=sub_type,
+        object_type_id=obj_type,
+    )
+
+    if not fact:
+        fact = await _derive_fact(session, subject_id, predicate, object_id)
+
+    thresholds = await proposals_mod.get_thresholds(
+        session,
+        workspace_id=workspace_id,
+        # Threshold per (subject) entity-type allowed; relation takes precedence.
+        entity_type_id=sub_type,
+        relation_type_id=relation.id,
+    )
+
+    # High-stakes contradiction guard: if this fact would close an existing
+    # live edge under cardinality-one, queue it for review regardless of
+    # confidence. Approval re-runs add_fact (which closes the old edge via
+    # the contradictor) under explicit human authorization.
+    if (
+        relation.high_stakes
+        and relation.cardinality_object == "one"
+        and not relation.symmetric
+    ):
+        # ``clock_timestamp()`` rather than ``now()`` because both
+        # statements may run inside the same transaction — ``now()``
+        # returns the transaction start time, which is before the
+        # existing edge's ``valid_from`` and would miss the conflict.
+        conflict = await session.execute(
+            text(
+                """
+                SELECT id::text FROM edge
+                WHERE workspace_id = :ws
+                  AND subject_id = :s
+                  AND predicate_id = :p
+                  AND object_id <> :o
+                  AND upper(sys_time) = 'infinity'
+                  AND valid_time @> clock_timestamp()
+                LIMIT 1
+                """
+            ),
+            {"ws": workspace_id, "s": subject_id, "p": relation.id, "o": object_id},
+        )
+        if conflict.first() is not None:
+            pending_id = await proposals_mod.enqueue_pending_fact(
+                session,
+                workspace_id=workspace_id,
+                subject_id=subject_id,
+                predicate_id=relation.id,
+                object_id=object_id,
+                fact=fact,
+                props=props,
+                valid_from=valid_from,
+                valid_to=valid_to,
+                source_id=source_id,
+                source_kind=source_kind,
+                confidence=confidence,
+                prov_activity_id=prov_activity_id,
+                status="pending",
+                reason="high_stakes_contradiction",
+            )
+            return FactWriteResult(kind="pending", pending_fact_id=pending_id)
+
+    # Below the floor — record as auto-rejected for audit, no edge.
+    if confidence < thresholds.auto_reject_below:
+        pending_id = await proposals_mod.enqueue_pending_fact(
+            session,
+            workspace_id=workspace_id,
+            subject_id=subject_id,
+            predicate_id=relation.id,
+            object_id=object_id,
+            fact=fact,
+            props=props,
+            valid_from=valid_from,
+            valid_to=valid_to,
+            source_id=source_id,
+            source_kind=source_kind,
+            confidence=confidence,
+            prov_activity_id=prov_activity_id,
+            status="rejected",
+            reason="auto_rejected_below_floor",
+        )
+        return FactWriteResult(kind="rejected", pending_fact_id=pending_id)
+
+    # In the review band — enqueue, don't insert.
+    if confidence < thresholds.min_confidence:
+        pending_id = await proposals_mod.enqueue_pending_fact(
+            session,
+            workspace_id=workspace_id,
+            subject_id=subject_id,
+            predicate_id=relation.id,
+            object_id=object_id,
+            fact=fact,
+            props=props,
+            valid_from=valid_from,
+            valid_to=valid_to,
+            source_id=source_id,
+            source_kind=source_kind,
+            confidence=confidence,
+            prov_activity_id=prov_activity_id,
+            status="pending",
+            reason="below_threshold",
+        )
+        return FactWriteResult(kind="pending", pending_fact_id=pending_id)
+
+    # At or above threshold — write through to edge.
+    edge = await add_fact(
+        session,
+        workspace_id=workspace_id,
+        subject_id=subject_id,
+        predicate=predicate,
+        object_id=object_id,
+        fact=fact,
+        props=props,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        source_id=source_id,
+        source_kind=source_kind,
+        confidence=confidence,
+        created_by=created_by,
+        prov_activity_id=prov_activity_id,
+    )
+    return FactWriteResult(kind="edge", edge=edge)
+
+
+@dataclass
+class FactWriteResult:
+    kind: str  # 'edge' | 'pending' | 'rejected'
+    edge: Edge | None = None
+    pending_fact_id: str | None = None
 
 
 async def invalidate(

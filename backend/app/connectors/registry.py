@@ -11,10 +11,10 @@ if TYPE_CHECKING:
     from app.connectors.base import CrawlerConnector
 
 
-_REGISTRY: dict[str, type["CrawlerConnector"]] = {}
+_REGISTRY: dict[str, type[CrawlerConnector]] = {}
 
 
-def register(connector_cls: type["CrawlerConnector"]) -> type["CrawlerConnector"]:
+def register(connector_cls: type[CrawlerConnector]) -> type[CrawlerConnector]:
     """Decorator: register a connector class by its ``.kind`` attribute."""
     if not getattr(connector_cls, "kind", None):
         raise TypeError(
@@ -31,7 +31,7 @@ def register(connector_cls: type["CrawlerConnector"]) -> type["CrawlerConnector"
     return connector_cls
 
 
-def get(kind: str) -> type["CrawlerConnector"]:
+def get(kind: str) -> type[CrawlerConnector]:
     if kind not in _REGISTRY:
         raise KeyError(f"unknown connector kind: {kind!r}")
     return _REGISTRY[kind]
@@ -39,6 +39,15 @@ def get(kind: str) -> type["CrawlerConnector"]:
 
 def list_kinds() -> list[str]:
     return sorted(_REGISTRY.keys())
+
+
+def get_connector(kind: str) -> CrawlerConnector:
+    """Return a fresh connector instance for ``kind``. Convenience for
+    callers that only need to invoke instance methods like ``check_access``
+    and don't want to manage class-vs-instance plumbing themselves.
+    """
+    cls = get(kind)
+    return cls()
 
 
 def _import_connectors() -> None:
@@ -49,4 +58,7 @@ def _import_connectors() -> None:
     with the framework's own helpers).
     """
     # Side-effect imports; ignore unused-import warnings.
-    from app.connectors import google_drive  # noqa: F401
+    from app.connectors import (
+        google_drive,  # noqa: F401
+        notion,  # noqa: F401
+    )

@@ -61,5 +61,11 @@ async def create_workspace(
     )
     await seed_workspace(session, workspace_id)
 
+    # Register the built-in action types so the kinetic action layer is
+    # usable on first boot. Idempotent: ON CONFLICT (workspace_id, slug)
+    # re-applies the schema if it changed in code.
+    from app.domain import action as action_mod
+    await action_mod.ensure_builtin_actions(session, workspace_id=workspace_id)
+
     log.info("workspace.created", id=workspace_id, slug=slug)
     return CreatedWorkspace(id=workspace_id, slug=slug, name=name)

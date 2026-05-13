@@ -179,6 +179,10 @@ async def get_entity_type(session: AsyncSession, ref: str) -> EntityType | None:
 
 
 async def get_relation_type(session: AsyncSession, ref: str) -> RelationType | None:
+    # Prefer the relation belonging to the session's current workspace when
+    # set. With multiple workspaces seeding the same system slugs, ordering
+    # by "current workspace first" makes the slug lookup deterministic even
+    # when the DB user bypasses RLS (tests, superuser tooling).
     result = await session.execute(
         text(
             """
@@ -190,6 +194,9 @@ async def get_relation_type(session: AsyncSession, ref: str) -> RelationType | N
                    ui_hints, system
             FROM relation_type
             WHERE (id::text = :ref OR slug = :ref) AND deleted_at IS NULL
+            ORDER BY
+              (workspace_id = current_workspace_id()) DESC NULLS LAST,
+              created_at
             LIMIT 1
             """
         ),

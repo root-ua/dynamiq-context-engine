@@ -5,6 +5,7 @@ from pathlib import PurePosixPath
 from uuid import uuid4
 
 from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
+from pydantic import BaseModel
 
 from app.api.rest.schemas import BlockTreeIn, DocumentCreate, DocumentOut
 from app.auth.deps import CurrentPrincipal, DbSession
@@ -14,6 +15,24 @@ from app.domain import document as doc_mod
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 log = get_logger(__name__)
+
+
+async def _require_doc_in_workspace(
+    session, document_id: str, principal
+):
+    """Load a document and verify it belongs to the principal's workspace.
+
+    Returns the document. Raises 404 if missing OR if it lives in a
+    different workspace — we deliberately don't distinguish the two so
+    the response doesn't leak which workspace a document id belongs to.
+    """
+    if not principal.workspace_id:
+        raise HTTPException(400, "workspace required")
+    doc = await doc_mod.get_document(session, document_id)
+    if not doc or doc.workspace_id != principal.workspace_id:
+        raise HTTPException(404, "document not found")
+    return doc
+
 
 # Hard limit — avoid OOM on a surprise 100MB drop. 10 MB is enough for
 # notes/markdown imports; larger files should go through a proper
@@ -69,23 +88,25 @@ async def create(
 
 @router.get("/{document_id}")
 async def get_doc(
-    document_id: str, _: CurrentPrincipal, session: DbSession
+    document_id: str, principal: CurrentPrincipal, session: DbSession
 ) -> DocumentOut:
-    doc = await doc_mod.get_document(session, document_id)
-    if not doc:
-        raise HTTPException(404, "document not found")
+    doc = await _require_doc_in_workspace(session, document_id, principal)
     return DocumentOut(**asdict(doc))
 
 
 @router.delete("/{document_id}", status_code=204, response_class=Response)
-async def delete_doc(document_id: str, _: CurrentPrincipal, session: DbSession):
+async def delete_doc(
+    document_id: str, principal: CurrentPrincipal, session: DbSession
+):
+    await _require_doc_in_workspace(session, document_id, principal)
     await doc_mod.delete_document(session, document_id)
 
 
 @router.get("/{document_id}/blocks")
 async def get_blocks(
-    document_id: str, _: CurrentPrincipal, session: DbSession
+    document_id: str, principal: CurrentPrincipal, session: DbSession
 ):
+    await _require_doc_in_workspace(session, document_id, principal)
     blocks = await doc_mod.list_blocks(session, document_id=document_id)
     return [asdict(b) for b in blocks]
 
@@ -94,15 +115,81 @@ async def get_blocks(
 async def replace_blocks(
     document_id: str,
     payload: BlockTreeIn,
-    _: CurrentPrincipal,
+    principal: CurrentPrincipal,
     session: DbSession,
 ) -> dict[str, str]:
+    await _require_doc_in_workspace(session, document_id, principal)
     await doc_mod.replace_block_tree(
         session,
         document_id=document_id,
         blocks=[b.model_dump() for b in payload.blocks],
     )
     return {"status": "ok"}
+
+
+@router.get("/{document_id}/revisions")
+async def list_revisions(
+    document_id: str, principal: CurrentPrincipal, session: DbSession
+):
+    await _require_doc_in_workspace(session, document_id, principal)
+    return await doc_mod.list_revisions(session, document_id=document_id)
+
+
+class _RevisionBody(BaseModel):
+    note: str | None = None
+
+
+@router.post("/{document_id}/revisions", status_code=201)
+async def create_revision(
+    document_id: str,
+    body: _RevisionBody,
+    principal: CurrentPrincipal,
+    session: DbSession,
+) -> dict[str, str]:
+    await _require_doc_in_workspace(session, document_id, principal)
+    rid = await doc_mod.snapshot_revision(
+        session,
+        document_id=document_id,
+        actor_id=principal.user_id,
+        note=body.note,
+    )
+    return {"id": rid}
+
+
+@router.post("/{document_id}/revisions/{revision_id}/restore")
+async def restore_revision(
+    document_id: str,
+    revision_id: str,
+    principal: CurrentPrincipal,
+    session: DbSession,
+) -> dict[str, str]:
+    await _require_doc_in_workspace(session, document_id, principal)
+    # The revision id also needs a workspace check so a caller can't
+    # restore another workspace's revision into their own document.
+    from sqlalchemy import text as _text
+
+    rev_ws = (
+        await session.execute(
+            _text(
+                "SELECT workspace_id::text FROM document_revision "
+                "WHERE id = :id"
+            ),
+            {"id": revision_id},
+        )
+    ).scalar_one_or_none()
+    if rev_ws != principal.workspace_id:
+        raise HTTPException(404, "revision not found")
+
+    try:
+        await doc_mod.restore_revision(
+            session,
+            document_id=document_id,
+            revision_id=revision_id,
+            actor_id=principal.user_id,
+        )
+    except doc_mod.DocumentError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"status": "restored"}
 
 
 @router.post("/upload", status_code=201)

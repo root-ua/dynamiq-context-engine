@@ -70,7 +70,7 @@ export default function SettingsPage() {
         high_sensitivity: highSensitivity,
       });
       push({ title: "Settings saved" });
-      refresh();
+      void refresh();
       void qc.invalidateQueries({ queryKey: ["workspaces"] });
     } catch (err: unknown) {
       push({
@@ -89,7 +89,7 @@ export default function SettingsPage() {
     try {
       await workspacesApi.remove(workspace.id, deleteWsSlug);
       push({ title: "Workspace deleted" });
-      refresh();
+      void refresh();
       void qc.invalidateQueries();
       void router.replace("/home");
     } catch (err) {

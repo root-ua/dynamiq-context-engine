@@ -11,7 +11,10 @@ interface WorkspaceContextType {
   workspace: Workspace | null;
   workspaces: Workspace[];
   setWorkspaceId: (id: string) => void;
-  refresh: () => void;
+  /** Refresh the workspaces list. Returns a promise that resolves
+   * after the refetch settles so callers can `await` before routing
+   * into a newly-created workspace. */
+  refresh: () => Promise<unknown>;
   isLoading: boolean;
 }
 
@@ -77,9 +80,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       workspace: workspace ?? null,
       workspaces,
       setWorkspaceId,
-      refresh: () => {
-        void refetch();
-      },
+      refresh: () => refetch(),
       isLoading,
     }),
     [workspace, workspaces, setWorkspaceId, refetch, isLoading],

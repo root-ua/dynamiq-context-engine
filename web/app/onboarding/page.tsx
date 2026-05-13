@@ -107,7 +107,7 @@ export default function OnboardingPage() {
       }
 
       setWorkspaceId(ws.id);
-      refresh();
+      void refresh();
       void router.push("/home");
     } catch (err: unknown) {
       push({

@@ -47,7 +47,7 @@ export default function InviteAcceptPage() {
     setAccepting(true);
     try {
       const { workspace_id } = await invitesApi.accept(token);
-      refresh();
+      void refresh();
       setWorkspaceId(workspace_id);
       push({
         title: `Welcome to ${preview.data?.workspace_name ?? "the workspace"}`,

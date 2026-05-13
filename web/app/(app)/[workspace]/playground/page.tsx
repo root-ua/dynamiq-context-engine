@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   PiChatsCircle,
@@ -14,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
 import { EmptyState } from "@/components/ui/empty";
 import { JsonView } from "@/components/ui/json-view";
+import { MarkdownView } from "@/components/ui/markdown";
 import { getToken } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -496,7 +498,15 @@ export default function PlaygroundPage() {
             Drop a PDF, image, or text file to hand it to Claude — Claude reads
             it natively and calls{" "}
             <code className="rounded bg-muted px-1">add_episode</code> to land
-            facts.
+            facts.{" "}
+            {workspace && (
+              <Link
+                href={`/${workspace.slug}/agent`}
+                className="underline decoration-muted-foreground/40 underline-offset-2 hover:decoration-foreground"
+              >
+                See the full 22-tool catalog →
+              </Link>
+            )}
           </p>
         </div>
         <div className="flex gap-2">
@@ -607,8 +617,8 @@ export default function PlaygroundPage() {
                   className={cn(
                     "max-w-[85%] rounded-lg px-3 py-2 text-sm",
                     isUser
-                      ? "ml-auto bg-foreground/5"
-                      : "whitespace-pre-wrap bg-background",
+                      ? "ml-auto whitespace-pre-wrap bg-foreground/5"
+                      : "bg-background",
                   )}
                 >
                   {atts.length > 0 && (
@@ -634,7 +644,11 @@ export default function PlaygroundPage() {
                     </div>
                   )}
                   {t.content.text ? (
-                    t.content.text
+                    isUser ? (
+                      t.content.text
+                    ) : (
+                      <MarkdownView content={t.content.text} />
+                    )
                   ) : isUser ? null : streaming && i === turns.length - 1 ? (
                     <span className="inline-flex gap-1">
                       <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" />

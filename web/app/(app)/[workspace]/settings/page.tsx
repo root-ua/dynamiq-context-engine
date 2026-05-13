@@ -1,6 +1,6 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -26,7 +26,12 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
-import { accountApi, exportsApi, workspacesApi } from "@/lib/api/endpoints";
+import {
+  accountApi,
+  exportsApi,
+  versionApi,
+  workspacesApi,
+} from "@/lib/api/endpoints";
 import { invalidateTokenCache } from "@/lib/api/client";
 import { authClient } from "@/lib/auth-client";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -346,6 +351,8 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      <BuildInfoCard />
+
       <Card className="border-destructive/40">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base text-destructive">
@@ -446,5 +453,44 @@ export default function SettingsPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function BuildInfoCard() {
+  const version = useQuery({
+    queryKey: ["api-version"],
+    queryFn: versionApi.get,
+    staleTime: 60_000,
+  });
+  const v = version.data;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Build info</CardTitle>
+        <CardDescription>
+          What this deployment is running. Surface this in support escalations.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-2 text-xs sm:grid-cols-2">
+        <div>
+          <div className="text-muted-foreground">Version</div>
+          <div className="font-mono">{v?.version ?? "…"}</div>
+        </div>
+        <div>
+          <div className="text-muted-foreground">Schema</div>
+          <div className="font-mono">{v?.schema_version ?? "…"}</div>
+        </div>
+        <div>
+          <div className="text-muted-foreground">Commit</div>
+          <div className="font-mono">
+            {v?.commit?.slice(0, 12) ?? "(unset — set GIT_SHA in deploy env)"}
+          </div>
+        </div>
+        <div>
+          <div className="text-muted-foreground">Deployed at</div>
+          <div className="font-mono">{v?.deployed_at ?? "—"}</div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

@@ -48,7 +48,11 @@ export default function OnboardingPage() {
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [mode, setMode] = useState<OntologyMode>("flexible");
-  const [loadDemo, setLoadDemo] = useState(true);
+  // Demo workspace is opt-in. Auto-enabling on signup was confusing
+  // — users were getting entities like "Dynamiq" in their freshly-
+  // created workspace without realising a second "Demo — Halcyon
+  // Labs" workspace had been spun up alongside their own.
+  const [loadDemo, setLoadDemo] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -200,10 +204,8 @@ export default function OnboardingPage() {
               />
               <span>
                 <span className="block text-sm font-semibold">
-                  Also create a demo workspace{" "}
-                  <span className="text-xs font-normal text-muted-foreground">
-                    (recommended)
-                  </span>
+                  Also create a separate &ldquo;Demo — Halcyon Labs&rdquo;
+                  workspace I can explore
                 </span>
                 <span className="mt-1 block text-xs text-muted-foreground">
                   A sandbox populated with realistic data (a fictional AI

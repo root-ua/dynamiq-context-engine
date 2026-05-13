@@ -39,6 +39,21 @@ export const meApi = {
 };
 
 // ---------------------------------------------------------------------------
+// Build info (git sha + alembic schema version)
+// ---------------------------------------------------------------------------
+
+export interface VersionInfo {
+  version: string;
+  commit: string | null;
+  deployed_at: string | null;
+  schema_version: string | null;
+}
+
+export const versionApi = {
+  get: () => api<VersionInfo>("/api/version"),
+};
+
+// ---------------------------------------------------------------------------
 // Workspaces
 // ---------------------------------------------------------------------------
 

@@ -21,6 +21,16 @@ interface WorkspaceContextType {
 const Ctx = React.createContext<WorkspaceContextType | null>(null);
 const STORAGE_KEY = "memory:selected-workspace";
 
+// Query-key prefixes that are NOT workspace-scoped. These survive a
+// workspace switch without re-fetching. Everything else gets
+// invalidated when the active workspace changes.
+const NEUTRAL_QUERY_KEYS = new Set([
+  "workspaces",
+  "me",
+  "session",
+  "api-version",
+]);
+
 export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   const { data: session } = useSession();
   const qc = useQueryClient();
@@ -49,25 +59,20 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         window.localStorage.setItem(STORAGE_KEY, id);
       }
       if (previousId && previousId !== id) {
-        // The new workspace has its own tenancy-scoped data; if we keep
-        // the previous workspace's cached queries, the user briefly sees
-        // the wrong entities while the new ones fetch. We also bust the
-        // minted-JWT cache so the next request lands with the new
-        // workspace in the claim.
-        //
-        // But we only invalidate *workspace-scoped* queries. Things like
-        // the list of workspaces, the session, and the `/api/me` query
-        // are workspace-neutral; nuking them causes a refetch storm that
-        // made rapid switching feel slow.
+        // Switching workspaces means every workspace-scoped query is
+        // stale. Older logic only matched queries whose key contained
+        // ``previousId``; that missed queries keyed only by name
+        // (e.g. ``["entities"]``), queries that had pre-fetched for
+        // the new id, and queries from a third workspace cached in
+        // the background. Invalidate everything except an explicit
+        // workspace-neutral allowlist.
         invalidateTokenCache();
         void qc.invalidateQueries({
           predicate: (q) => {
             const key = q.queryKey;
-            if (!Array.isArray(key)) return false;
-            // Every workspace-scoped query keys the wsId somewhere in
-            // its tuple (usually index 1). If the previous id appears
-            // anywhere in the key, it's per-workspace and should refresh.
-            return key.some((part) => part === previousId);
+            if (!Array.isArray(key) || key.length === 0) return false;
+            const first = String(key[0]);
+            return !NEUTRAL_QUERY_KEYS.has(first);
           },
         });
       }

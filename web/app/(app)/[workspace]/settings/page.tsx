@@ -1,6 +1,6 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -26,7 +26,12 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
-import { accountApi, exportsApi, workspacesApi } from "@/lib/api/endpoints";
+import {
+  accountApi,
+  exportsApi,
+  versionApi,
+  workspacesApi,
+} from "@/lib/api/endpoints";
 import { invalidateTokenCache } from "@/lib/api/client";
 import { authClient } from "@/lib/auth-client";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -70,7 +75,7 @@ export default function SettingsPage() {
         high_sensitivity: highSensitivity,
       });
       push({ title: "Settings saved" });
-      refresh();
+      void refresh();
       void qc.invalidateQueries({ queryKey: ["workspaces"] });
     } catch (err: unknown) {
       push({
@@ -89,7 +94,7 @@ export default function SettingsPage() {
     try {
       await workspacesApi.remove(workspace.id, deleteWsSlug);
       push({ title: "Workspace deleted" });
-      refresh();
+      void refresh();
       void qc.invalidateQueries();
       void router.replace("/home");
     } catch (err) {
@@ -229,6 +234,25 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
+          <CardTitle className="text-base">MCP agents</CardTitle>
+          <CardDescription>
+            Mint long-lived tokens to let Claude Code, Cursor, Claude Desktop,
+            the Claude web app, or any other MCP-aware client connect to this
+            workspace.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            variant="outline"
+            onClick={() => router.push(`/${workspace.slug}/settings/agents`)}
+          >
+            Manage agent tokens
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle className="text-base">Data</CardTitle>
           <CardDescription>
             Export every entity, edge, episode, audit row, label, and action
@@ -326,6 +350,8 @@ export default function SettingsPage() {
           </Button>
         </CardContent>
       </Card>
+
+      <BuildInfoCard />
 
       <Card className="border-destructive/40">
         <CardHeader>
@@ -427,5 +453,44 @@ export default function SettingsPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function BuildInfoCard() {
+  const version = useQuery({
+    queryKey: ["api-version"],
+    queryFn: versionApi.get,
+    staleTime: 60_000,
+  });
+  const v = version.data;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Build info</CardTitle>
+        <CardDescription>
+          What this deployment is running. Surface this in support escalations.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-2 text-xs sm:grid-cols-2">
+        <div>
+          <div className="text-muted-foreground">Version</div>
+          <div className="font-mono">{v?.version ?? "…"}</div>
+        </div>
+        <div>
+          <div className="text-muted-foreground">Schema</div>
+          <div className="font-mono">{v?.schema_version ?? "…"}</div>
+        </div>
+        <div>
+          <div className="text-muted-foreground">Commit</div>
+          <div className="font-mono">
+            {v?.commit?.slice(0, 12) ?? "(unset — set GIT_SHA in deploy env)"}
+          </div>
+        </div>
+        <div>
+          <div className="text-muted-foreground">Deployed at</div>
+          <div className="font-mono">{v?.deployed_at ?? "—"}</div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

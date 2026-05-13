@@ -29,8 +29,19 @@ export function WorkspaceSwitcher() {
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
+  // True once the user has typed into the slug field directly. While
+  // false, the slug auto-derives from the name on every keystroke; once
+  // the user takes manual control the auto-derive backs off.
+  const [slugDirty, setSlugDirty] = useState(false);
   const [mode, setMode] = useState<"strict" | "flexible" | "auto">("flexible");
   const [submitting, setSubmitting] = useState(false);
+
+  function closeCreateDialog() {
+    setCreateOpen(false);
+    setName("");
+    setSlug("");
+    setSlugDirty(false);
+  }
 
   function pick(id: string, targetSlug: string) {
     setWorkspaceId(id);
@@ -48,12 +59,14 @@ export function WorkspaceSwitcher() {
         ontology_mode: mode,
       });
       push({ title: "Workspace created" });
-      setCreateOpen(false);
-      setName("");
-      setSlug("");
       setWorkspaceId(ws.id);
-      refresh();
-      void router.push(`/${ws.slug}`);
+      // Await the workspace-list refetch so the next page's
+      // ``useWorkspace().workspaces`` includes the new entry. The
+      // ``[workspace]/layout.tsx`` guard rejects unknown slugs and
+      // bounces back to a fallback workspace if we navigate too early.
+      await refresh();
+      closeCreateDialog();
+      router.push(`/${ws.slug}`);
     } catch (err: unknown) {
       push({
         title: "Failed",
@@ -116,7 +129,10 @@ export function WorkspaceSwitcher() {
         </div>
       )}
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+      <Dialog
+        open={createOpen}
+        onOpenChange={(o) => (o ? setCreateOpen(true) : closeCreateDialog())}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>New workspace</DialogTitle>
@@ -132,8 +148,9 @@ export function WorkspaceSwitcher() {
                 required
                 value={name}
                 onChange={(e) => {
-                  setName(e.target.value);
-                  if (!slug) setSlug(slugify(e.target.value));
+                  const next = e.target.value;
+                  setName(next);
+                  if (!slugDirty) setSlug(slugify(next));
                 }}
               />
             </div>
@@ -144,7 +161,10 @@ export function WorkspaceSwitcher() {
                 required
                 pattern="[a-z0-9-]+"
                 value={slug}
-                onChange={(e) => setSlug(e.target.value.toLowerCase())}
+                onChange={(e) => {
+                  setSlugDirty(true);
+                  setSlug(e.target.value.toLowerCase());
+                }}
               />
             </div>
             <div className="space-y-1">
@@ -167,7 +187,7 @@ export function WorkspaceSwitcher() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setCreateOpen(false)}
+                onClick={closeCreateDialog}
               >
                 Cancel
               </Button>

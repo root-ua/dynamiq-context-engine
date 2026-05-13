@@ -9,6 +9,7 @@ import { InvocationStatusBadge } from "@/components/actions/InvocationStatusBadg
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty";
+import { JsonView } from "@/components/ui/json-view";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { actionTypesApi, actionsApi } from "@/lib/api/endpoints";
 import { formatDateTime } from "@/lib/format";
@@ -135,7 +136,23 @@ export default function ActionsPage() {
           value="history"
           className="mt-4 flex min-h-0 flex-1 flex-col gap-3"
         >
-          {invocations.length === 0 ? (
+          {invocationsQuery.isLoading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Card key={i}>
+                  <CardHeader className="p-3">
+                    <div className="flex items-center gap-2">
+                      <div className="h-4 w-32 animate-pulse rounded bg-muted" />
+                      <div className="h-4 w-16 animate-pulse rounded bg-muted" />
+                    </div>
+                  </CardHeader>
+                  <CardContent className="p-3 pt-0">
+                    <div className="h-16 animate-pulse rounded bg-muted/40" />
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          ) : invocations.length === 0 ? (
             <EmptyState
               title="No invocations yet"
               description="Action invocations will appear here once the catalog is in use."
@@ -164,11 +181,7 @@ export default function ActionsPage() {
                         {inv.error_message}
                       </p>
                     ) : (
-                      inv.result && (
-                        <pre className="overflow-x-auto rounded bg-muted/40 p-2 text-[11px] leading-tight">
-                          {JSON.stringify(inv.result, null, 2)}
-                        </pre>
-                      )
+                      inv.result && <JsonView value={inv.result} />
                     )}
                   </CardContent>
                 </Card>

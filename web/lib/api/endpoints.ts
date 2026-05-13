@@ -39,6 +39,21 @@ export const meApi = {
 };
 
 // ---------------------------------------------------------------------------
+// Build info (git sha + alembic schema version)
+// ---------------------------------------------------------------------------
+
+export interface VersionInfo {
+  version: string;
+  commit: string | null;
+  deployed_at: string | null;
+  schema_version: string | null;
+}
+
+export const versionApi = {
+  get: () => api<VersionInfo>("/api/version"),
+};
+
+// ---------------------------------------------------------------------------
 // Workspaces
 // ---------------------------------------------------------------------------
 
@@ -694,6 +709,11 @@ export const agentTokensApi = {
   revoke: (workspaceId: string, id: string) =>
     api<void>(`/api/agent-tokens/${id}`, {
       method: "DELETE",
+      workspaceId,
+    }),
+  rotate: (workspaceId: string, id: string) =>
+    api<AgentTokenCreated>(`/api/agent-tokens/${id}/rotate`, {
+      method: "POST",
       workspaceId,
     }),
 };

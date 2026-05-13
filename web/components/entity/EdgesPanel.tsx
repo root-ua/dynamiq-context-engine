@@ -216,6 +216,20 @@ function EdgeRow({
           edgeId={edge.id}
           createdAt={edge.created_at}
         />
+        {edge.confidence !== null && edge.confidence !== undefined ? (
+          <span
+            className="rounded-full border bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+            title="Confidence"
+          >
+            {edge.confidence.toFixed(2)}
+          </span>
+        ) : null}
+        <span
+          className="rounded-full border bg-background px-2 py-0.5 text-[10px] text-muted-foreground"
+          title={`Valid from ${edge.valid_from}`}
+        >
+          {freshnessLabel(edge.valid_from)}
+        </span>
         {labels.map((l) => (
           <LabelBadge
             key={l.id}
@@ -234,4 +248,15 @@ function EdgeRow({
       </div>
     </li>
   );
+}
+
+function freshnessLabel(validFrom: string): string {
+  const t = Date.parse(validFrom);
+  if (Number.isNaN(t)) return validFrom;
+  const days = Math.floor((Date.now() - t) / 86_400_000);
+  if (days < 1) return "today";
+  if (days < 7) return `${days}d ago`;
+  if (days < 30) return `${Math.floor(days / 7)}w ago`;
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+  return `${Math.floor(days / 365)}y ago`;
 }

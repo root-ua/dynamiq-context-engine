@@ -20,12 +20,17 @@ cp .env.example .env
 # playground / live tests.
 
 make up                              # docker compose up --build
-open http://localhost:3000           # signup → workspace → playground
+open http://localhost:53000          # signup → workspace → playground
 ```
 
 That's it. First boot pulls Postgres 17 (pgvector), Redis 7, a pinned
 MinIO release, runs the Alembic migration container to head, and
 brings the backend / worker / hocuspocus / web on line.
+
+Full walkthrough including external client setup (Claude Code,
+Cursor, Claude Web, OpenAI Agents SDK), troubleshooting and the
+test recipes lives in
+[`docs/running-locally.md`](docs/running-locally.md).
 
 ---
 

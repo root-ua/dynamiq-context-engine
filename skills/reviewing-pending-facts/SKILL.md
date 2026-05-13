@@ -77,6 +77,25 @@ rather than blindly retrying.
 
 Marks the proposal as `rejected`. The fact never lands as an edge.
 
+## Auditing what got materialised
+
+After approve/reject, the platform writes an `audit_log` row + a
+`prov_activity` row. The downstream view: was this edge actually
+modified by an action later? Use `list_action_invocations` for that
+audit trail:
+
+```json
+{
+  "tool": "list_action_invocations",
+  "arguments": {"status": "completed"}
+}
+```
+
+Returns every kinetic-action run in the workspace with its input,
+result, and the activity id you can follow via `get_provenance`.
+Useful when reconciling "I approved this fact yesterday, who else
+touched it?".
+
 ## Don't
 
 - Don't bulk-approve a category without spot-checking. Low-confidence

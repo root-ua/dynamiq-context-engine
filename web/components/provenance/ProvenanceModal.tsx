@@ -5,6 +5,8 @@ import { useQuery } from "@tanstack/react-query";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { CopyButton } from "@/components/ui/copy-button";
+import { JsonView } from "@/components/ui/json-view";
 import {
   Dialog,
   DialogContent,
@@ -174,12 +176,13 @@ export function ProvenanceModal({
             )}
 
             <details className="rounded-md border bg-muted/30 p-2">
-              <summary className="cursor-pointer text-xs text-muted-foreground">
-                Raw JSON-LD
+              <summary className="flex cursor-pointer items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span>Raw JSON-LD</span>
+                <CopyButton value={JSON.stringify(doc, null, 2)} label="" />
               </summary>
-              <pre className="mt-2 max-h-72 overflow-auto text-[11px] leading-tight">
-                {JSON.stringify(doc, null, 2)}
-              </pre>
+              <div className="mt-2 max-h-72 overflow-auto">
+                <JsonView value={doc} />
+              </div>
             </details>
           </div>
         )}

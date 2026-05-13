@@ -239,7 +239,7 @@ export function TypeEditor({ type, allTypes, workspaceId }: TypeEditorProps) {
               </div>
               <div>
                 <h4 className="mb-3 text-sm font-semibold">Live preview</h4>
-                <div className="rounded-lg border p-4">
+                <div className="max-h-[60vh] overflow-auto rounded-lg border p-4">
                   <SchemaPreview schema={previewSchema} />
                 </div>
               </div>
@@ -382,6 +382,10 @@ function SchemaPreview({ schema }: { schema: Record<string, unknown> }) {
       formData={formData}
       onChange={(e) => setFormData(e.formData)}
       liveValidate
+      // rjsf's default top-of-form error list emits raw unstyled HTML
+      // that bleeds across the narrow preview column. Field-level
+      // inline error markers are the right surface here.
+      showErrorList={false}
       tagName="div"
       uiSchema={{ "ui:submitButtonOptions": { norender: true } }}
     />

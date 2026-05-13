@@ -17,8 +17,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.connectors.base import CredentialBundle
+from app.core.config import get_settings
 
 
 class ConnectorError(Exception):

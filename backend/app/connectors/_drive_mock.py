@@ -17,7 +17,7 @@ matrix is meaningful:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.connectors.base import (
     ACLEntry,
@@ -29,7 +29,7 @@ from app.connectors.base import (
 
 
 def _now() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 # Mock OAuth bundle returned from exchange_code in mock mode. The shape

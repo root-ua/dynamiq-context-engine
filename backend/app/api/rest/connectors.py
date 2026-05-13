@@ -284,7 +284,7 @@ async def oauth_callback(
             code=payload.code,
             redirect_uri=_redirect_uri(),
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         await connector_domain.mark_status(
             session,
             instance_id=instance_id,

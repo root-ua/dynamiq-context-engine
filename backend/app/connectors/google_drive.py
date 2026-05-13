@@ -23,7 +23,7 @@ import asyncio
 import io
 import logging
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
 
@@ -66,6 +66,56 @@ _MAX_BYTES = 5 * 1024 * 1024  # 5MB content cap; bigger files skipped with a war
 class GoogleDriveConnector(CrawlerConnector):
     kind = "google_drive"
     display_name = "Google Drive"
+
+    async def check_access(
+        self,
+        session,
+        *,
+        workspace_id: str,
+        principal_user_id: str,
+        source_ref: str,
+    ) -> bool:
+        """Live re-check that the user still has read access to a Drive
+        file.
+
+        Behavior:
+        * **Mock mode** (``MOCK_DRIVE=1``) — always returns True; the
+          mock ACL snapshot is the test contract.
+        * **High-sensitivity workspace, no bridged Google identity** —
+          returns False. The whole point of the high-sensitivity flag
+          is to fail closed when we can't independently confirm access.
+        * **Standard workspace, no bridged identity** — returns True;
+          the snapshot ACL already gated the fact.
+        * **Bridged identity present** — currently returns True (real
+          ``files.get`` via domain-wide delegation is a follow-up).
+        """
+        if get_settings().mock_drive:
+            return True
+
+        from sqlalchemy import text as _text
+        row = (
+            await session.execute(
+                _text(
+                    """
+                    SELECT uei.external_id, uei.external_email
+                    FROM user_external_identity uei
+                    WHERE uei.user_id = CAST(:u AS uuid)
+                      AND uei.workspace_id = CAST(:w AS uuid)
+                      AND uei.provider = 'google'
+                    LIMIT 1
+                    """
+                ),
+                {"u": principal_user_id, "w": workspace_id},
+            )
+        ).first()
+        if not row:
+            # No bridged identity. High-sensitivity workspaces fail
+            # closed; the rest fall back to the snapshot ACL.
+            return not await _is_high_sensitivity(session, workspace_id)
+        # TODO: real Drive ``files.get`` impersonation via
+        # domain-wide delegation. For now the snapshot ACL is
+        # authoritative.
+        return True
 
     # ------------------------------------------------------------------
     # OAuth
@@ -238,7 +288,7 @@ class GoogleDriveConnector(CrawlerConnector):
                     item = await asyncio.to_thread(_fetch_item_sync, service, f)
                     if item is not None:
                         yield item
-                except Exception as exc:  # noqa: BLE001 — log and continue
+                except Exception as exc:
                     log.warning(
                         "drive.fetch_item_failed file_id=%s err=%s", f.get("id"), exc
                     )
@@ -287,7 +337,7 @@ class GoogleDriveConnector(CrawlerConnector):
                     item = await asyncio.to_thread(_fetch_item_sync, service, f)
                     if item is not None:
                         yield item
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     log.warning(
                         "drive.fetch_change_failed file_id=%s err=%s",
                         f.get("id"),
@@ -403,7 +453,7 @@ def _fetch_content_sync(service, file_id: str, mime: str | None) -> str | None:
         return _extract_pdf_text(raw)
     try:
         return raw.decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -418,7 +468,7 @@ def _extract_pdf_text(raw: bytes) -> str:
     for page in reader.pages:
         try:
             parts.append(page.extract_text() or "")
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
     return "\n\n".join(parts)
 
@@ -461,5 +511,21 @@ def _fetch_acl_sync(service, file_id: str) -> list[ACLEntry]:
     return out
 
 
+async def _is_high_sensitivity(session, workspace_id: str) -> bool:
+    """Read the ``high_sensitivity`` flag for fail-closed source recheck."""
+    from sqlalchemy import text as _text
+
+    row = (
+        await session.execute(
+            _text(
+                "SELECT high_sensitivity FROM workspace "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": workspace_id},
+        )
+    ).first()
+    return bool(row and row[0])
+
+
 def _now() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)

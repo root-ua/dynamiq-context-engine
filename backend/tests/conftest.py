@@ -8,6 +8,15 @@ These tests require a live Postgres with our extensions. The easiest path is:
     POSTGRES_SYNC_URL=postgresql://memory:memory@localhost:5432/memory \
     JWT_SECRET=test \
     pytest
+
+RLS hygiene note: the default ``memory`` Postgres role used by tests is
+a superuser with ``BYPASSRLS=t``, so RLS policies in migrations do NOT
+filter rows during tests. The application's ACL is application-layer
+(``app/auth/acl.py`` builds explicit SQL clauses), so this does not
+make tests theatre — but it does mean app code that *implicitly* relies
+on RLS will silently leak across workspaces in tests. Per-scenario
+fixtures that depend on RLS enforcement should explicitly set
+``app.current_workspace_id`` AND scope their SELECTs.
 """
 from __future__ import annotations
 
@@ -28,6 +37,11 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "test")
 from app.db.session import session_scope
 from app.domain import entity as entity_mod
 from app.domain.workspace import create_workspace
+
+# Expose scenario fixtures globally so K + L tests can request them
+# without per-file imports.
+from tests.fixtures.enterprise import enterprise_workspace  # noqa: F401
+from tests.fixtures.reranker import stub_reranker  # noqa: F401
 
 
 @pytest.fixture(scope="session")

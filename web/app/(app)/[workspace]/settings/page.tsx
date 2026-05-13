@@ -24,8 +24,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
-import { accountApi, workspacesApi } from "@/lib/api/endpoints";
+import { accountApi, exportsApi, workspacesApi } from "@/lib/api/endpoints";
 import { invalidateTokenCache } from "@/lib/api/client";
 import { authClient } from "@/lib/auth-client";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -41,7 +42,15 @@ export default function SettingsPage() {
     (workspace?.settings?.ontology_mode as "strict" | "flexible" | "auto") ??
       "flexible",
   );
+  const [highSensitivity, setHighSensitivity] = useState(
+    Boolean(workspace?.high_sensitivity),
+  );
   const [saving, setSaving] = useState(false);
+  const [exportJobId, setExportJobId] = useState<string | null>(null);
+  const [exportStatus, setExportStatus] = useState<
+    "idle" | "queued" | "running" | "completed" | "failed"
+  >("idle");
+  const [exportUrl, setExportUrl] = useState<string | null>(null);
 
   const [deleteWsOpen, setDeleteWsOpen] = useState(false);
   const [deleteWsSlug, setDeleteWsSlug] = useState("");
@@ -55,7 +64,11 @@ export default function SettingsPage() {
     if (!workspace) return;
     setSaving(true);
     try {
-      await workspacesApi.update(workspace.id, { name, ontology_mode: mode });
+      await workspacesApi.update(workspace.id, {
+        name,
+        ontology_mode: mode,
+        high_sensitivity: highSensitivity,
+      });
       push({ title: "Settings saved" });
       refresh();
       void qc.invalidateQueries({ queryKey: ["workspaces"] });
@@ -184,11 +197,108 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Privacy</CardTitle>
+          <CardDescription>
+            Higher-sensitivity workspaces re-verify the caller&apos;s
+            source-system access for the top retrieval hits on every query.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <Label htmlFor="high-sensitivity">High-sensitivity workspace</Label>
+            <p className="text-xs text-muted-foreground">
+              When enabled, top-N edge results trigger a live
+              <code className="mx-1">check_access</code> with each connector
+              before being returned.
+            </p>
+          </div>
+          <Switch
+            id="high-sensitivity"
+            checked={highSensitivity}
+            onChange={(e) => setHighSensitivity(e.target.checked)}
+          />
+        </CardContent>
+      </Card>
+
       <div className="flex justify-end">
         <Button onClick={save} disabled={saving}>
           {saving ? "Saving…" : "Save"}
         </Button>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Data</CardTitle>
+          <CardDescription>
+            Export every entity, edge, episode, audit row, label, and action
+            invocation in this workspace as gzipped JSON-lines.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={async () => {
+              try {
+                setExportStatus("queued");
+                const job = await exportsApi.startWorkspace(workspace.id);
+                setExportJobId(job.id);
+                setExportStatus(
+                  job.status === "completed" ? "completed" : "running",
+                );
+                if (job.download_url) setExportUrl(job.download_url);
+              } catch (err) {
+                setExportStatus("failed");
+                push({
+                  title: "Export failed to start",
+                  description: err instanceof Error ? err.message : String(err),
+                  variant: "destructive",
+                });
+              }
+            }}
+            disabled={exportStatus === "queued" || exportStatus === "running"}
+          >
+            {exportStatus === "queued" || exportStatus === "running"
+              ? "Exporting…"
+              : "Export workspace data"}
+          </Button>
+          {exportJobId && (
+            <Button
+              variant="outline"
+              onClick={async () => {
+                try {
+                  const job = await exportsApi.pollWorkspace(
+                    workspace.id,
+                    exportJobId,
+                  );
+                  setExportStatus(job.status ?? "running");
+                  if (job.download_url) setExportUrl(job.download_url);
+                } catch (err) {
+                  push({
+                    title: "Poll failed",
+                    description:
+                      err instanceof Error ? err.message : String(err),
+                    variant: "destructive",
+                  });
+                }
+              }}
+            >
+              Refresh status
+            </Button>
+          )}
+          {exportUrl && (
+            <a
+              href={exportUrl}
+              className="text-sm underline"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Download .jsonl.gz
+            </a>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

@@ -327,6 +327,126 @@ def _extract_mentions(content: Any) -> list[dict[str, Any]]:
 # Reads
 # ---------------------------------------------------------------------------
 
+async def snapshot_revision(
+    session: AsyncSession,
+    *,
+    document_id: str,
+    actor_id: str | None = None,
+    note: str | None = None,
+) -> str:
+    """Freeze the current block tree as a ``document_revision`` row.
+
+    Returns the new revision id. Cheap to call repeatedly — caller controls
+    debounce; the UI exposes both an explicit "Save revision" button and
+    Hocuspocus can opt to call this on persistence.
+    """
+    doc = await get_document(session, document_id)
+    if not doc:
+        raise DocumentError("document not found")
+    blocks = await list_blocks(session, document_id=document_id)
+    # ``list_blocks`` returns Block dataclasses; serialize to a list of
+    # plain dicts shaped like the input to ``replace_block_tree`` so the
+    # snapshot can be restored without translation. Position is encoded
+    # as a string to preserve Decimal precision — BlockNote uses
+    # fractional positions to sort between siblings and float
+    # round-tripping would re-order blocks on restore.
+    blocks_payload = [
+        {
+            "id": b.id,
+            "parent_block_id": b.parent_block_id,
+            "position": str(b.position),
+            "block_type": b.block_type,
+            "content": b.content,
+            "props": b.props,
+            "search_text": b.search_text,
+        }
+        for b in blocks
+    ]
+    row = (
+        await session.execute(
+            text(
+                """
+                INSERT INTO document_revision
+                  (workspace_id, document_id, blocks_snapshot, created_by, note)
+                VALUES (:ws, :doc, CAST(:blocks AS jsonb), :u, :note)
+                RETURNING id::text
+                """
+            ),
+            {
+                "ws": doc.workspace_id,
+                "doc": document_id,
+                "blocks": json.dumps(blocks_payload),
+                "u": actor_id,
+                "note": note,
+            },
+        )
+    ).first()
+    assert row is not None
+    return row[0]
+
+
+async def list_revisions(
+    session: AsyncSession, *, document_id: str
+) -> list[dict[str, Any]]:
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text, workspace_id::text, document_id::text,
+                       created_by::text, created_at::text, note
+                FROM document_revision
+                WHERE document_id = :doc
+                ORDER BY created_at DESC
+                LIMIT 200
+                """
+            ),
+            {"doc": document_id},
+        )
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+async def restore_revision(
+    session: AsyncSession,
+    *,
+    document_id: str,
+    revision_id: str,
+    actor_id: str | None = None,
+) -> None:
+    """Replace the live block tree with the revision's snapshot.
+
+    Also captures the CURRENT state as a fresh revision first so the
+    user can undo the restore.
+    """
+    rev_row = (
+        await session.execute(
+            text(
+                """
+                SELECT blocks_snapshot
+                FROM document_revision
+                WHERE id = :id AND document_id = :doc
+                """
+            ),
+            {"id": revision_id, "doc": document_id},
+        )
+    ).first()
+    if not rev_row:
+        raise DocumentError("revision not found")
+
+    # Stash the current state under an auto-note so restores are reversible.
+    await snapshot_revision(
+        session,
+        document_id=document_id,
+        actor_id=actor_id,
+        note=f"auto-snapshot before restore of {revision_id}",
+    )
+
+    snapshot = rev_row[0] or []
+    await replace_block_tree(
+        session, document_id=document_id, blocks=list(snapshot)
+    )
+
+
 async def list_blocks(
     session: AsyncSession, *, document_id: str
 ) -> list[Block]:

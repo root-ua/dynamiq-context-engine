@@ -1,15 +1,26 @@
 import { api, getToken } from "./client";
 import type {
+  ActionInvocation,
+  ActionType,
   AuditEntry,
   Document,
+  DocumentRevision,
   Edge,
   Entity,
   EntityType,
   Episode,
+  ExportJob,
+  ExtractionPolicy,
   GraphPayload,
+  Label,
+  LabelPolicy,
+  LabelPolicyAction,
+  LabelPolicyRule,
   McpTool,
   OntologyProposal,
   OntologySnapshot,
+  PendingFact,
+  ProvenanceDoc,
   RelationType,
   SearchResponse,
   Workspace,
@@ -40,7 +51,14 @@ export const workspacesApi = {
   }) => api<Workspace>("/api/workspaces", { method: "POST", body: data }),
   get: (id: string) =>
     api<Workspace>(`/api/workspaces/${id}`, { workspaceId: id }),
-  update: (id: string, patch: { name?: string; ontology_mode?: string }) =>
+  update: (
+    id: string,
+    patch: {
+      name?: string;
+      ontology_mode?: string;
+      high_sensitivity?: boolean;
+    },
+  ) =>
     api<Workspace>(`/api/workspaces/${id}`, {
       method: "PATCH",
       body: patch,
@@ -690,12 +708,7 @@ export interface ConnectorInstance {
   connector_kind: string;
   display_name: string;
   config: Record<string, unknown>;
-  status:
-    | "inactive"
-    | "authorizing"
-    | "active"
-    | "paused"
-    | "error";
+  status: "inactive" | "authorizing" | "active" | "paused" | "error";
   last_full_crawl_at: string | null;
   last_incremental_at: string | null;
   last_error: string | null;
@@ -816,6 +829,298 @@ export interface SourceEpisodeDetail extends SourceEpisode {
   derived_edges: SourceEdge[];
   acl: unknown[] | null;
 }
+
+// ---------------------------------------------------------------------------
+// Proposals (fact review queue) + extraction policies
+// ---------------------------------------------------------------------------
+
+export const proposalsApi = {
+  list: (
+    workspaceId: string,
+    opts: {
+      status?: "pending" | "approved" | "rejected" | "superseded";
+      limit?: number;
+      offset?: number;
+      predicate_id?: string;
+      source_kind?: string;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (opts.status) qs.set("status", opts.status);
+    if (opts.limit) qs.set("limit", String(opts.limit));
+    if (opts.offset) qs.set("offset", String(opts.offset));
+    if (opts.predicate_id) qs.set("predicate_id", opts.predicate_id);
+    if (opts.source_kind) qs.set("source_kind", opts.source_kind);
+    const suffix = qs.size ? `?${qs}` : "";
+    return api<PendingFact[]>(`/api/proposals${suffix}`, { workspaceId });
+  },
+  get: (workspaceId: string, id: string) =>
+    api<PendingFact>(`/api/proposals/${id}`, { workspaceId }),
+  approve: (workspaceId: string, id: string, comment?: string) =>
+    api<{ approved_edge_id: string; edge: Edge }>(
+      `/api/proposals/${id}/approve`,
+      { method: "POST", body: { comment: comment ?? null }, workspaceId },
+    ),
+  reject: (workspaceId: string, id: string, reason: string) =>
+    api<PendingFact>(`/api/proposals/${id}/reject`, {
+      method: "POST",
+      body: { reason },
+      workspaceId,
+    }),
+};
+
+export const extractionPolicyApi = {
+  list: (workspaceId: string) =>
+    api<ExtractionPolicy[]>(`/api/extraction-policies`, { workspaceId }),
+  upsert: (
+    workspaceId: string,
+    body: {
+      entity_type_id?: string | null;
+      relation_type_id?: string | null;
+      min_confidence: number;
+      auto_reject_below: number;
+    },
+  ) =>
+    api<{ id: string }>(`/api/extraction-policies`, {
+      method: "POST",
+      body,
+      workspaceId,
+    }),
+  delete: (workspaceId: string, id: string) =>
+    api<void>(`/api/extraction-policies/${id}`, {
+      method: "DELETE",
+      workspaceId,
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// Provenance (W3C PROV-O JSON-LD)
+// ---------------------------------------------------------------------------
+
+export const provenanceApi = {
+  edge: (workspaceId: string, edgeId: string) =>
+    api<ProvenanceDoc>(`/api/provenance/edge/${edgeId}`, { workspaceId }),
+  episode: (workspaceId: string, episodeId: string) =>
+    api<ProvenanceDoc>(`/api/provenance/episode/${episodeId}`, { workspaceId }),
+};
+
+// ---------------------------------------------------------------------------
+// Sensitivity labels + label policies
+// ---------------------------------------------------------------------------
+
+export const labelsApi = {
+  list: (workspaceId: string) => api<Label[]>("/api/labels", { workspaceId }),
+  forTarget: (
+    workspaceId: string,
+    targetKind: "edge" | "episode",
+    targetId: string,
+  ) =>
+    api<Label[]>(
+      `/api/labels/for/${targetKind}/${encodeURIComponent(targetId)}`,
+      { workspaceId },
+    ),
+  create: (
+    workspaceId: string,
+    body: {
+      slug: string;
+      name: string;
+      description?: string | null;
+      color?: string | null;
+      parent_slug?: string | null;
+    },
+  ) => api<Label>("/api/labels", { method: "POST", body, workspaceId }),
+  delete: (workspaceId: string, slug: string) =>
+    api<void>(`/api/labels/${encodeURIComponent(slug)}`, {
+      method: "DELETE",
+      workspaceId,
+    }),
+  assign: (
+    workspaceId: string,
+    slug: string,
+    body: { target_kind: "edge" | "episode"; target_id: string },
+  ) =>
+    api<{ ok: string }>(`/api/labels/${encodeURIComponent(slug)}/assign`, {
+      method: "POST",
+      body,
+      workspaceId,
+    }),
+  unassign: (
+    workspaceId: string,
+    slug: string,
+    body: { target_kind: "edge" | "episode"; target_id: string },
+  ) =>
+    api<{ ok: string }>(`/api/labels/${encodeURIComponent(slug)}/unassign`, {
+      method: "POST",
+      body,
+      workspaceId,
+    }),
+  bulkAssign: (
+    workspaceId: string,
+    slug: string,
+    targets: Array<{ kind: "edge" | "episode"; id: string }>,
+  ) =>
+    api<{ assigned: number; failed: Array<{ id: string; error: string }> }>(
+      `/api/labels/${encodeURIComponent(slug)}/bulk-assign`,
+      { method: "POST", body: { targets }, workspaceId },
+    ),
+};
+
+export const labelPoliciesApi = {
+  list: (workspaceId: string) =>
+    api<LabelPolicy[]>("/api/label-policies", { workspaceId }),
+  create: (
+    workspaceId: string,
+    body: {
+      name: string;
+      rule: LabelPolicyRule;
+      action: LabelPolicyAction;
+      enabled?: boolean;
+    },
+  ) =>
+    api<LabelPolicy>("/api/label-policies", {
+      method: "POST",
+      body,
+      workspaceId,
+    }),
+  delete: (workspaceId: string, id: string) =>
+    api<void>(`/api/label-policies/${id}`, {
+      method: "DELETE",
+      workspaceId,
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// Kinetic actions
+// ---------------------------------------------------------------------------
+
+export const actionTypesApi = {
+  list: (workspaceId: string) =>
+    api<ActionType[]>("/api/action-types", { workspaceId }),
+  create: (
+    workspaceId: string,
+    body: {
+      slug: string;
+      name: string;
+      description?: string | null;
+      source_kind?: string | null;
+      input_schema: Record<string, unknown>;
+      required_role?: "viewer" | "editor" | "admin" | "owner";
+      idempotency_required?: boolean;
+      requires_approval?: boolean;
+      side_effects?: string[];
+    },
+  ) =>
+    api<ActionType>("/api/action-types", {
+      method: "POST",
+      body,
+      workspaceId,
+    }),
+};
+
+export const actionsApi = {
+  invoke: (
+    workspaceId: string,
+    typeSlug: string,
+    body: {
+      input: Record<string, unknown>;
+      idempotency_key?: string | null;
+    },
+  ) =>
+    api<ActionInvocation>(
+      `/api/actions/${encodeURIComponent(typeSlug)}/invoke`,
+      { method: "POST", body, workspaceId },
+    ),
+  listInvocations: (
+    workspaceId: string,
+    opts: { status?: string; limit?: number; offset?: number } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (opts.status) qs.set("status", opts.status);
+    if (opts.limit) qs.set("limit", String(opts.limit));
+    if (opts.offset) qs.set("offset", String(opts.offset));
+    const suffix = qs.size ? `?${qs}` : "";
+    return api<ActionInvocation[]>(`/api/actions/invocations${suffix}`, {
+      workspaceId,
+    });
+  },
+  approve: (workspaceId: string, id: string) =>
+    api<ActionInvocation>(`/api/actions/invocations/${id}/approve`, {
+      method: "POST",
+      workspaceId,
+    }),
+  reject: (workspaceId: string, id: string, reason: string) =>
+    api<ActionInvocation>(`/api/actions/invocations/${id}/reject`, {
+      method: "POST",
+      body: { reason },
+      workspaceId,
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// Bulk operations on the review queue
+// ---------------------------------------------------------------------------
+
+export const proposalsBulkApi = {
+  approve: (
+    workspaceId: string,
+    body: { ids: string[]; comment?: string | null },
+  ) =>
+    api<{
+      results: Array<{ id: string; ok: boolean; error?: string }>;
+    }>("/api/proposals/bulk-approve", {
+      method: "POST",
+      body,
+      workspaceId,
+    }),
+  reject: (workspaceId: string, body: { ids: string[]; reason: string }) =>
+    api<{
+      results: Array<{ id: string; ok: boolean; error?: string }>;
+    }>("/api/proposals/bulk-reject", {
+      method: "POST",
+      body,
+      workspaceId,
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// Document revisions
+// ---------------------------------------------------------------------------
+
+export const revisionsApi = {
+  list: (workspaceId: string, documentId: string) =>
+    api<DocumentRevision[]>(`/api/documents/${documentId}/revisions`, {
+      workspaceId,
+    }),
+  create: (workspaceId: string, documentId: string, note?: string | null) =>
+    api<DocumentRevision>(`/api/documents/${documentId}/revisions`, {
+      method: "POST",
+      body: { note: note ?? null },
+      workspaceId,
+    }),
+  restore: (workspaceId: string, documentId: string, revisionId: string) =>
+    api<{ status: string }>(
+      `/api/documents/${documentId}/revisions/${revisionId}/restore`,
+      { method: "POST", workspaceId },
+    ),
+};
+
+// ---------------------------------------------------------------------------
+// Data export
+// ---------------------------------------------------------------------------
+
+export const exportsApi = {
+  startWorkspace: (workspaceId: string) =>
+    api<ExportJob>(`/api/workspaces/${workspaceId}/export`, {
+      method: "POST",
+      workspaceId,
+    }),
+  pollWorkspace: (workspaceId: string, jobId: string) =>
+    api<ExportJob>(`/api/workspaces/${workspaceId}/export/${jobId}`, {
+      workspaceId,
+    }),
+  startMe: () => api<ExportJob>("/api/me/export", { method: "POST" }),
+  pollMe: (jobId: string) => api<ExportJob>(`/api/me/export/${jobId}`),
+};
 
 export const sourcesApi = {
   list: (workspaceId: string, opts?: { limit?: number; offset?: number }) => {

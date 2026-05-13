@@ -18,11 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.jwt import Principal
 from app.core.logging import get_logger
+from app.domain import action as action_mod
 from app.domain import auto_ontology
 from app.domain import edge as edge_mod
 from app.domain import entity as entity_mod
 from app.domain import episode as episode_mod
 from app.domain import ontology as ontology_mod
+from app.domain import proposals as proposals_mod
+from app.domain import provenance as prov_mod
+from app.domain import sensitivity as sens_mod
 from app.retrieval.graph import traverse
 from app.retrieval.hybrid import search as hybrid_search
 from app.workers.queue import enqueue_extraction
@@ -135,6 +139,54 @@ class AsOfIn(BaseModel):
     predicate: str | None = None
 
 
+class GetProvenanceIn(BaseModel):
+    fact_id: str = Field(..., description="Edge id (a.k.a. fact id).")
+
+
+class ListProposalsIn(BaseModel):
+    status: Literal["pending", "approved", "rejected", "superseded"] = "pending"
+    limit: int = Field(50, ge=1, le=200)
+    offset: int = Field(0, ge=0)
+    predicate_id: str | None = None
+    source_kind: str | None = None
+
+
+class ApproveProposalIn(BaseModel):
+    proposal_id: str
+    comment: str | None = None
+
+
+class RejectProposalIn(BaseModel):
+    proposal_id: str
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class ListLabelsIn(BaseModel):
+    pass
+
+
+class AssignLabelIn(BaseModel):
+    target_kind: Literal["edge", "episode"]
+    target_id: str
+    label_slug: str
+
+
+class ListActionTypesIn(BaseModel):
+    pass
+
+
+class ExecuteActionIn(BaseModel):
+    type_slug: str
+    input: dict[str, Any]
+    idempotency_key: str | None = None
+
+
+class ListActionInvocationsIn(BaseModel):
+    status: str | None = None
+    limit: int = Field(50, ge=1, le=200)
+    offset: int = Field(0, ge=0)
+
+
 # ---------------------------------------------------------------------------
 # Tool handlers
 # ---------------------------------------------------------------------------
@@ -195,26 +247,60 @@ async def _graph_query(session: AsyncSession, workspace_id: str, actor_id: str |
     return {"nodes": [asdict(n) for n in sub.nodes], "edges": [asdict(e) for e in sub.edges]}
 
 
-async def _add_fact(session: AsyncSession, workspace_id: str, actor_id: str | None, p: AddFactIn) -> dict[str, Any]:
+async def _add_fact(
+    session: AsyncSession,
+    workspace_id: str,
+    actor_id: str | None,
+    p: AddFactIn,
+    principal: Principal,
+) -> dict[str, Any]:
     subject = await entity_mod.get(session, p.subject)
     obj = await entity_mod.get(session, p.object)
     if not subject or not obj:
         return {"error": "subject or object not found"}
 
-    edge = await edge_mod.add_fact(
+    # ``prov_activity.agent_kind`` is constrained to
+    # {'llm','user','system','connector'} — service-token callers map
+    # to 'system'; session-JWT callers map to 'user'.
+    agent_kind = "system" if principal.kind == "service" else "user"
+    activity_id = await prov_mod.start_activity(
         session,
         workspace_id=workspace_id,
-        subject_id=subject.id,
-        predicate=p.predicate,
-        object_id=obj.id,
-        fact=p.fact,
-        valid_from=p.valid_from,
-        valid_to=p.valid_to,
-        confidence=p.confidence,
-        source_kind="agent",
-        source_id=None,
-        created_by=actor_id,
+        kind="manual_edit",
+        agent_kind=agent_kind,
+        agent_ref=actor_id,
+        inputs={
+            "tool": "add_fact",
+            "subject": p.subject,
+            "predicate": p.predicate,
+            "object": p.object,
+        },
     )
+
+    edge = None
+    try:
+        edge = await edge_mod.add_fact(
+            session,
+            workspace_id=workspace_id,
+            subject_id=subject.id,
+            predicate=p.predicate,
+            object_id=obj.id,
+            fact=p.fact,
+            valid_from=p.valid_from,
+            valid_to=p.valid_to,
+            confidence=p.confidence,
+            source_kind="agent",
+            source_id=None,
+            created_by=actor_id,
+            prov_activity_id=activity_id,
+        )
+    finally:
+        # Always close the activity, even on a domain-layer raise, so we
+        # don't leave open ``prov_activity`` rows littering audit views.
+        await prov_mod.end_activity(
+            session, activity_id,
+            outputs={"edge_id": edge.id} if edge else {"error": "raised"},
+        )
     return {"edge": asdict(edge)}
 
 
@@ -230,19 +316,54 @@ async def _invalidate_fact(session: AsyncSession, workspace_id: str, actor_id: s
     return {"edge": asdict(edge)}
 
 
-async def _add_episode(session: AsyncSession, workspace_id: str, actor_id: str | None, p: AddEpisodeIn) -> dict[str, Any]:
-    ep = await episode_mod.add_episode(
+async def _add_episode(
+    session: AsyncSession,
+    workspace_id: str,
+    actor_id: str | None,
+    p: AddEpisodeIn,
+    principal: Principal,
+) -> dict[str, Any]:
+    # ``prov_activity.agent_kind`` is constrained to
+    # {'llm','user','system','connector'} — service-token callers map
+    # to 'system'; session-JWT callers map to 'user'.
+    agent_kind = "system" if principal.kind == "service" else "user"
+    activity_id = await prov_mod.start_activity(
         session,
         workspace_id=workspace_id,
-        content=p.content,
-        source_kind=p.source_kind,
-        source_ref=p.source_ref,
-        occurred_at=p.occurred_at,
-        created_by=actor_id,
+        kind="manual_edit",
+        agent_kind=agent_kind,
+        agent_ref=actor_id,
+        inputs={"tool": "add_episode", "source_kind": p.source_kind},
     )
-    if p.extract:
-        await enqueue_extraction(
-            workspace_id=workspace_id, episode_id=ep.id, actor_id=actor_id,
+
+    ep = None
+    try:
+        ep = await episode_mod.add_episode(
+            session,
+            workspace_id=workspace_id,
+            content=p.content,
+            source_kind=p.source_kind,
+            source_ref=p.source_ref,
+            occurred_at=p.occurred_at,
+            created_by=actor_id,
+        )
+        # Episode domain layer doesn't accept prov_activity_id today —
+        # stamp it post-insert so the MCP wrapper keeps the contract.
+        await session.execute(
+            text(
+                "UPDATE episode SET prov_activity_id = CAST(:a AS uuid) "
+                "WHERE id = :id"
+            ),
+            {"a": activity_id, "id": ep.id},
+        )
+        if p.extract:
+            await enqueue_extraction(
+                workspace_id=workspace_id, episode_id=ep.id, actor_id=actor_id,
+            )
+    finally:
+        await prov_mod.end_activity(
+            session, activity_id,
+            outputs={"episode_id": ep.id} if ep else {"error": "raised"},
         )
     return {"episode_id": ep.id, "status": ep.processing_status}
 
@@ -340,6 +461,104 @@ async def _propose_ontology(session: AsyncSession, workspace_id: str, actor_id: 
     return out
 
 
+async def _get_provenance(session: AsyncSession, workspace_id: str, actor_id: str | None, p: GetProvenanceIn) -> dict[str, Any]:
+    doc = await prov_mod.get_edge_provenance(session, p.fact_id)
+    if not doc:
+        return {"error": "fact not found"}
+    return doc
+
+
+async def _list_proposals(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ListProposalsIn) -> dict[str, Any]:
+    rows = await proposals_mod.list_proposals(
+        session,
+        workspace_id=workspace_id,
+        status=p.status,
+        limit=p.limit,
+        offset=p.offset,
+        predicate_id=p.predicate_id,
+        source_kind=p.source_kind,
+    )
+    return {"proposals": [asdict(r) for r in rows]}
+
+
+async def _approve_proposal(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ApproveProposalIn) -> dict[str, Any]:
+    try:
+        edge = await proposals_mod.approve_proposal(
+            session,
+            proposal_id=p.proposal_id,
+            principal_user_id=actor_id,
+            comment=p.comment,
+        )
+    except proposals_mod.ProposalError as exc:
+        return {"error": str(exc)}
+    return {"approved_edge_id": edge.id, "edge": asdict(edge)}
+
+
+async def _list_labels(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ListLabelsIn) -> dict[str, Any]:
+    labels = await sens_mod.list_labels(session, workspace_id=workspace_id)
+    return {"labels": [asdict(l) for l in labels]}
+
+
+async def _list_action_types(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ListActionTypesIn) -> dict[str, Any]:
+    types = await action_mod.list_action_types(session, workspace_id=workspace_id)
+    return {"action_types": [asdict(t) for t in types]}
+
+
+async def _execute_action(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ExecuteActionIn, principal: Principal) -> dict[str, Any]:
+    from uuid import uuid4 as _uuid4
+    try:
+        inv = await action_mod.execute_action(
+            session,
+            workspace_id=workspace_id,
+            type_slug=p.type_slug,
+            input=p.input,
+            idempotency_key=p.idempotency_key or str(_uuid4()),
+            principal=principal,
+        )
+    except action_mod.ActionError as exc:
+        return {"error": str(exc)}
+    return {"invocation": asdict(inv)}
+
+
+async def _list_action_invocations(session: AsyncSession, workspace_id: str, actor_id: str | None, p: ListActionInvocationsIn) -> dict[str, Any]:
+    rows = await action_mod.list_invocations(
+        session,
+        workspace_id=workspace_id,
+        status=p.status,
+        limit=p.limit,
+        offset=p.offset,
+    )
+    return {"invocations": [asdict(r) for r in rows]}
+
+
+async def _assign_label(session: AsyncSession, workspace_id: str, actor_id: str | None, p: AssignLabelIn) -> dict[str, Any]:
+    try:
+        await sens_mod.assign_label(
+            session,
+            workspace_id=workspace_id,
+            target_kind=p.target_kind,
+            target_id=p.target_id,
+            label_slug=p.label_slug,
+            assigned_by=actor_id,
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {"ok": True}
+
+
+async def _reject_proposal(session: AsyncSession, workspace_id: str, actor_id: str | None, p: RejectProposalIn) -> dict[str, Any]:
+    try:
+        rejected = await proposals_mod.reject_proposal(
+            session,
+            proposal_id=p.proposal_id,
+            principal_user_id=actor_id,
+            reason=p.reason,
+        )
+    except proposals_mod.ProposalError as exc:
+        return {"error": str(exc)}
+    return asdict(rejected)
+
+
 async def _as_of_query(session: AsyncSession, workspace_id: str, actor_id: str | None, p: AsOfIn, principal: Principal) -> dict[str, Any]:
     subject_id: str | None = None
     if p.subject:
@@ -382,6 +601,15 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(name="create_relation_type", description="Create a new relation type with domain/range constraints, cardinality, and temporal / symmetric / transitive / high-stakes flags.", input_schema=CreateRelationTypeIn, handler=_create_relation_type),
     ToolSpec(name="propose_ontology", description="Ask the LLM to propose an ontology (entity and relation types) from sample text or existing episodes. Optionally apply the proposal immediately.", input_schema=ProposeOntologyIn, handler=_propose_ontology),
     ToolSpec(name="as_of_query", description="Query edges as they were at a past valid time (bi-temporal as-of query).", input_schema=AsOfIn, handler=_as_of_query),
+    ToolSpec(name="get_provenance", description="Return W3C PROV-O JSON-LD for a fact (edge), including the activity that produced it, the agent (LLM / user / connector), and the source episode it was derived from.", input_schema=GetProvenanceIn, handler=_get_provenance),
+    ToolSpec(name="list_proposals", description="List facts in the review queue (pending / approved / rejected / superseded). Use this to surface low-confidence extractions that need human approval.", input_schema=ListProposalsIn, handler=_list_proposals),
+    ToolSpec(name="approve_proposal", description="Approve a pending fact and promote it to a live edge. Reuses the same cardinality / contradictor invariants as direct fact insertion.", input_schema=ApproveProposalIn, handler=_approve_proposal),
+    ToolSpec(name="reject_proposal", description="Reject a pending fact with a written reason. The proposal stays as audit evidence; no edge is created.", input_schema=RejectProposalIn, handler=_reject_proposal),
+    ToolSpec(name="list_labels", description="List all sensitivity labels in the workspace, with their hierarchical paths and metadata. Use to discover label slugs before assigning.", input_schema=ListLabelsIn, handler=_list_labels),
+    ToolSpec(name="assign_label", description="Assign a sensitivity label to an edge or episode. The label and target must already exist; label policies are re-evaluated at retrieval time.", input_schema=AssignLabelIn, handler=_assign_label),
+    ToolSpec(name="list_action_types", description="List the registered kinetic action types in the workspace (catalog). Returns input_schema, required_role, idempotency requirements, and declared side_effects.", input_schema=ListActionTypesIn, handler=_list_action_types),
+    ToolSpec(name="execute_action", description="Invoke a registered action by slug. Idempotent on (type_slug, idempotency_key): re-invocation returns the cached result. Validates input against the action's JSON Schema.", input_schema=ExecuteActionIn, handler=_execute_action),
+    ToolSpec(name="list_action_invocations", description="List action invocations in this workspace, optionally filtered by status (pending/approved/executing/completed/failed/rejected).", input_schema=ListActionInvocationsIn, handler=_list_action_invocations),
 ]
 
 

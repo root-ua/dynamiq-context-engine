@@ -25,6 +25,19 @@ class EntityNotFoundError(Exception):
     pass
 
 
+class EntityMergeUnsafeError(Exception):
+    """Raised when ``merge_cluster`` refuses a merge that would touch
+    too many entities connected by weak-confidence edges.
+
+    The check is intentionally conservative: a customer should never be
+    surprised by silent collapse of 12 entities into one. The caller can
+    either lower the cluster size, raise edge confidence, or break the
+    cluster up into pair-merges performed under explicit review.
+    """
+
+    pass
+
+
 @dataclass
 class Entity:
     id: str
@@ -311,60 +324,141 @@ async def merge_entities(
     actor_kind: str = "user",
     actor_id: str | None = None,
 ) -> Entity:
-    """Merge `loser` into `survivor`. Rewrites edges and marks the loser merged."""
-    if survivor_id == loser_id:
+    """Merge `loser` into `survivor`. Rewrites edges and marks the loser merged.
+
+    Pair shape — for batch merges use ``merge_cluster`` (which runs the
+    weak-cluster safeguard). Pair merges (cluster size 2) always pass
+    the safeguard, so this is equivalent to calling ``merge_cluster``
+    with one loser.
+    """
+    return await merge_cluster(
+        session,
+        survivor_id=survivor_id,
+        loser_ids=[loser_id],
+        actor_kind=actor_kind,
+        actor_id=actor_id,
+    )
+
+
+async def merge_cluster(
+    session: AsyncSession,
+    *,
+    survivor_id: str,
+    loser_ids: list[str],
+    actor_kind: str = "user",
+    actor_id: str | None = None,
+) -> Entity:
+    """Merge each loser in ``loser_ids`` into ``survivor_id``.
+
+    Before any edge rewrite, ``cluster_is_safe_to_merge`` runs on the
+    full set of touched entity ids (survivor + losers). Refusals raise
+    ``EntityMergeUnsafeError`` and the database is left untouched.
+
+    The pair-merge call shape (one loser) always passes the safeguard
+    because the cluster size threshold is generous.
+    """
+    if not loser_ids:
+        raise ValueError("loser_ids must be non-empty")
+    if survivor_id in loser_ids:
         raise ValueError("cannot merge an entity with itself")
+    if len(set(loser_ids)) != len(loser_ids):
+        raise ValueError("loser_ids must be unique")
 
-    # Rewrite edges pointing at the loser. Two statements — asyncpg rejects
-    # multiple SQL statements in a single execute(), so issue them separately.
-    await session.execute(
-        text(
-            """
-            UPDATE edge SET subject_id = :s
-            WHERE subject_id = :l AND upper(sys_time) = 'infinity'
-            """
-        ),
-        {"s": survivor_id, "l": loser_id},
-    )
-    await session.execute(
-        text(
-            """
-            UPDATE edge SET object_id = :s
-            WHERE object_id = :l AND upper(sys_time) = 'infinity'
-            """
-        ),
-        {"s": survivor_id, "l": loser_id},
-    )
+    # Resolve workspace_id from the survivor so callers don't have to
+    # pass it in; merge across workspaces is an explicit error.
+    workspace_id = (
+        await session.execute(
+            text(
+                "SELECT workspace_id::text FROM entity WHERE id = :id"
+            ),
+            {"id": survivor_id},
+        )
+    ).scalar_one_or_none()
+    if workspace_id is None:
+        raise EntityNotFoundError(survivor_id)
 
-    # Mark loser merged.
-    await session.execute(
-        text(
-            """
-            UPDATE entity SET merged_into_id = :s
-            WHERE id = :l AND merged_into_id IS NULL
-            """
-        ),
-        {"s": survivor_id, "l": loser_id},
-    )
+    # Reject cross-workspace merges loudly.
+    ws_row = (
+        await session.execute(
+            text(
+                "SELECT id::text FROM entity "
+                "WHERE id = ANY(:ids) AND workspace_id <> CAST(:ws AS uuid)"
+            ),
+            {"ids": loser_ids, "ws": workspace_id},
+        )
+    ).first()
+    if ws_row is not None:
+        raise EntityMergeUnsafeError(
+            f"cross-workspace merge rejected: entity {ws_row[0]} is in a "
+            f"different workspace from survivor {survivor_id}"
+        )
 
-    # Audit
-    await session.execute(
-        text(
-            """
-            INSERT INTO audit_log (workspace_id, actor_kind, actor_id, action,
-                                   target_kind, target_id, diff)
-            SELECT e.workspace_id, :actor_kind, :actor_id, 'entity.merge',
-                   'entity', CAST(:survivor_id AS uuid),
-                   jsonb_build_object(
-                     'survivor_id', CAST(:survivor_id AS text),
-                     'loser_id', CAST(:loser_id AS text)
-                   )
-            FROM entity e WHERE e.id = CAST(:survivor_id AS uuid)
-            """
-        ),
-        {"actor_kind": actor_kind, "actor_id": actor_id,
-         "survivor_id": survivor_id, "loser_id": loser_id},
+    # Safeguard: bail before any UPDATE runs.
+    from app.domain import entity_resolver as resolver_mod
+
+    cluster = [survivor_id, *loser_ids]
+    safe, reason = await resolver_mod.cluster_is_safe_to_merge(
+        session, workspace_id=workspace_id, entity_ids=cluster
     )
+    if not safe:
+        raise EntityMergeUnsafeError(
+            f"cluster merge refused: {reason} "
+            f"(cluster size={len(cluster)}, survivor={survivor_id})"
+        )
+
+    # Now perform the rewrites for each loser. Two UPDATEs per loser
+    # because asyncpg rejects multi-statement execute().
+    for loser_id in loser_ids:
+        await session.execute(
+            text(
+                """
+                UPDATE edge SET subject_id = :s
+                WHERE subject_id = :l AND upper(sys_time) = 'infinity'
+                """
+            ),
+            {"s": survivor_id, "l": loser_id},
+        )
+        await session.execute(
+            text(
+                """
+                UPDATE edge SET object_id = :s
+                WHERE object_id = :l AND upper(sys_time) = 'infinity'
+                """
+            ),
+            {"s": survivor_id, "l": loser_id},
+        )
+        await session.execute(
+            text(
+                """
+                UPDATE entity SET merged_into_id = :s
+                WHERE id = :l AND merged_into_id IS NULL
+                """
+            ),
+            {"s": survivor_id, "l": loser_id},
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO audit_log (workspace_id, actor_kind, actor_id, action,
+                                       target_kind, target_id, diff)
+                VALUES (CAST(:ws AS uuid), :actor_kind, :actor_id, 'entity.merge',
+                        'entity', CAST(:survivor_id AS uuid),
+                        jsonb_build_object(
+                          'survivor_id', CAST(:survivor_id AS text),
+                          'loser_id', CAST(:loser_id AS text),
+                          'cluster_size', CAST(:cluster_size AS int)
+                        ))
+                """
+            ),
+            {
+                "ws": workspace_id,
+                "actor_kind": actor_kind,
+                "actor_id": actor_id,
+                "survivor_id": survivor_id,
+                "loser_id": loser_id,
+                "cluster_size": len(cluster),
+            },
+        )
 
     survivor = await get(session, survivor_id)
     assert survivor is not None

@@ -5,9 +5,12 @@ import {
   PiStack as Layers,
   PiGraph as Network,
   PiPlus as Plus,
+  PiTag as TagIcon,
   PiMagicWand as Wand2,
 } from "react-icons/pi";
 
+import { LabelManager } from "@/components/labels/LabelManager";
+import { LabelPolicyEditor } from "@/components/labels/LabelPolicyEditor";
 import { RelationCreateDialog } from "@/components/ontology/RelationCreateDialog";
 import { RelationEditor } from "@/components/ontology/RelationEditor";
 import { RelationList } from "@/components/ontology/RelationList";
@@ -119,6 +122,10 @@ export default function OntologyPage() {
                 {relations.length}
               </span>
             </TabsTrigger>
+            <TabsTrigger value="labels">
+              <TagIcon className="mr-1.5 h-3.5 w-3.5" />
+              Labels
+            </TabsTrigger>
           </TabsList>
         </div>
 
@@ -222,6 +229,14 @@ export default function OntologyPage() {
               )}
             </div>
           </div>
+        </TabsContent>
+
+        <TabsContent
+          value="labels"
+          className="mt-4 flex min-h-0 flex-1 flex-col gap-6"
+        >
+          <LabelManager workspaceId={workspaceId} />
+          <LabelPolicyEditor workspaceId={workspaceId} />
         </TabsContent>
       </Tabs>
 

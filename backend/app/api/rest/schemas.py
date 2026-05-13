@@ -330,3 +330,4 @@ class WorkspaceCreate(BaseModel):
 class WorkspaceSettingsUpdate(BaseModel):
     name: str | None = None
     ontology_mode: Literal["strict", "flexible", "auto"] | None = None
+    high_sensitivity: bool | None = None

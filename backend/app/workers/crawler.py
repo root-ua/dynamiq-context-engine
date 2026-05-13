@@ -32,9 +32,9 @@ from app.connectors.base import CrawledItem, DeletedItem
 from app.connectors.canned import apply_canned_facts
 from app.connectors.upsert import (
     UpsertResult,
+    _replace_acl,
     soft_delete_item,
     upsert_item,
-    _replace_acl,
 )
 from app.db.session import session_scope
 from app.domain import connector as connector_domain
@@ -183,7 +183,7 @@ async def _run_crawl(
                         connector_instance_id=connector_instance_id,
                         item=yielded,
                     )
-                except Exception as exc:  # noqa: BLE001 — log and continue
+                except Exception as exc:
                     counts["errors"] += 1
                     log.warning(
                         "crawler.upsert_failed external_id=%s err=%s",
@@ -229,7 +229,7 @@ async def _run_crawl(
                         actor_id=instance.created_by,
                     )
                     counts["extracted"] += 1
-        except Exception as exc:  # noqa: BLE001 — top-level crawl error
+        except Exception as exc:
             log.exception("crawler.fatal id=%s", connector_instance_id)
             await connector_domain.mark_status(
                 session, instance_id=connector_instance_id,

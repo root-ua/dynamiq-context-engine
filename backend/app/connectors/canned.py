@@ -18,7 +18,6 @@ don't depend on embeddings.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,7 +83,7 @@ async def apply_canned_facts(
                 run_contradictor=False,
             )
             inserted += 1
-        except Exception as exc:  # noqa: BLE001 — keep crawl moving on bad facts
+        except Exception as exc:
             log.warning(
                 "canned.fact_failed episode=%s err=%s fact=%r",
                 episode_id, exc, fact.fact_text,

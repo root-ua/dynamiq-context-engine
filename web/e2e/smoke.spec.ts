@@ -54,9 +54,38 @@ test("signup, create workspace, write a note, mention an entity", async ({
     .first();
   await expect(titleInput).toBeVisible();
 
-  // Agent console lists tools.
+  // Agent console lists tools, including the RFC-001 alignment tools.
   await page.getByRole("link", { name: "Agent console" }).click();
   await expect(page.getByText("ontology_describe")).toBeVisible();
   await expect(page.getByText("search_memory")).toBeVisible();
   await expect(page.getByText("create_entity_type")).toBeVisible();
+  // Phase A–D MCP tools surface in the catalog.
+  await expect(page.getByText("get_provenance")).toBeVisible();
+  await expect(page.getByText("list_proposals")).toBeVisible();
+  await expect(page.getByText("assign_label")).toBeVisible();
+  await expect(page.getByText("execute_action")).toBeVisible();
+
+  // Governance: review queue page renders (may be empty in the smoke
+  // path — assert the header, not specific rows).
+  await page.getByRole("link", { name: "Review queue" }).click();
+  await expect(
+    page.getByRole("heading", { name: /review queue/i }),
+  ).toBeVisible();
+
+  // Actions catalog mounts and shows the built-in attach_evidence_to_fact.
+  await page.getByRole("link", { name: "Actions" }).click();
+  await expect(page.getByRole("heading", { name: /actions/i })).toBeVisible();
+  await expect(page.getByText("attach_evidence_to_fact")).toBeVisible();
+
+  // Sensitivity labels tab is reachable from ontology.
+  await page.getByRole("link", { name: "Ontology" }).click();
+  await page.getByRole("tab", { name: /labels/i }).click();
+  await expect(
+    page.getByRole("heading", { name: /sensitivity labels/i }),
+  ).toBeVisible();
+
+  // Settings shows the new Privacy section + high-sensitivity toggle.
+  await page.getByRole("link", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: /privacy/i })).toBeVisible();
+  await expect(page.getByLabel("High-sensitivity workspace")).toBeVisible();
 });

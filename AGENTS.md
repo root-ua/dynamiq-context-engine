@@ -217,6 +217,64 @@ Edit the generated file. The entrypoint auto-applies on next `docker compose up 
 
 ---
 
+## 7b. RFC-001 v3 alignment contracts
+
+Four post-MVP subsystems shipped in the alignment pass (see
+`docs/architecture/rfc-001-alignment.md` for the per-section status):
+
+### Provenance contract (PROV-O)
+
+Every edge, episode, and entity_attribute may attribute itself to a
+single `prov_activity` row (`backend/app/domain/provenance.py`). The
+extraction pipeline opens an activity at the start of a run and closes
+it after writing outputs. Read-side: `GET /api/provenance/edge/:id`
+returns JSON-LD with the `prov:` namespace. MCP exposes
+`get_provenance(fact_id)`.
+
+**Rule:** if you add a new code path that produces edges or episodes,
+open an activity (`prov.start_activity(...)`) and pass `prov_activity_id`
+through to the writer. Tests can stub this with `kind='manual_edit'`.
+
+### Proposal / review queue contract
+
+`edge.add_fact` writes through directly. `edge.propose_fact` consults
+`extraction_policy` and routes the fact to `edge` / `pending_fact` /
+auto-reject based on confidence. Extraction MUST go through
+`propose_fact`. High-stakes contradictions also route to pending
+regardless of confidence — approval there explicitly authorizes closing
+the prior fact.
+
+REST: `/api/proposals[?status=]`, `:id/approve|reject`. MCP:
+`list_proposals`, `approve_proposal`, `reject_proposal`.
+
+### Sensitivity labels & policy contract
+
+Labels live on `sensitivity_label` (ltree hierarchy). Edges and episodes
+carry many-to-many label assignments. `label_policy` rows declare rules
+in JSONB. `apply_label_policy` runs after RRF fusion and before MMR in
+hybrid retrieval — dropping, warning, or blocking candidates based on
+their assigned labels and the principal's role.
+
+Supported rule kinds (extend in `app/domain/sensitivity.py`):
+- `{"kind": "mutually_exclusive", "labels": [...]}`
+- `{"kind": "requires_role", "labels": [...], "roles": ["admin","owner"]}`
+
+REST: `/api/labels`, `/api/label-policies`. MCP: `list_labels`,
+`assign_label`.
+
+### Action contracts
+
+Action types are registered through
+`action_mod.register_action_type` and their handlers via
+`@register_handler(slug)`. Invocation is idempotent on
+`(workspace_id, action_type_id, idempotency_key)`. The built-in action
+is `attach_evidence_to_fact` (appends evidence to `edge.props.evidence`;
+optional Drive write-back).
+
+REST: `/api/action-types`, `/api/actions/:slug/invoke`,
+`/api/actions/invocations[?status=]`. MCP: `list_action_types`,
+`execute_action`, `list_action_invocations`.
+
 ## 8. Further reading
 
 - **[README.md](README.md)** — product overview + stack + quickstart.

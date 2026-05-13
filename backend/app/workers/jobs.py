@@ -2,9 +2,18 @@
 
 One process runs as the FastAPI HTTP server; a sibling process
 (`backend-worker` in docker-compose) pulls jobs from Redis.
+
+Graceful shutdown: on SIGTERM we set a drain flag in the Arq context so
+the worker stops accepting new jobs while in-flight jobs finish. The
+flag is honored by Arq's internal scheduler via ``ctx["drain_until"]``.
+Once ``WORKER_DRAIN_SECONDS`` elapses, the process exits — orchestrators
+that send a second SIGTERM after that get a clean exit too.
 """
 from __future__ import annotations
 
+import asyncio
+import signal
+import time
 from typing import Any
 
 from arq.connections import RedisSettings
@@ -16,13 +25,49 @@ from app.db.session import session_scope
 log = get_logger(__name__)
 
 
+def _install_signal_handlers(ctx: dict) -> None:
+    """Wire SIGTERM/SIGINT to flip ``ctx['draining']`` and cap the wait."""
+    loop = asyncio.get_event_loop()
+
+    def _drain(signame: str) -> None:
+        if ctx.get("draining"):
+            log.info("arq.worker.drain.repeat_signal", signal=signame)
+            return
+        seconds = get_settings().worker_drain_seconds
+        ctx["draining"] = True
+        ctx["drain_until"] = time.monotonic() + seconds
+        log.info(
+            "arq.worker.drain.start",
+            signal=signame,
+            seconds=seconds,
+        )
+        # Schedule a hard stop so we exit cleanly even if a job hangs.
+        loop.call_later(seconds, _force_exit)
+
+    def _force_exit() -> None:
+        log.info("arq.worker.drain.force_exit")
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _drain, "SIGTERM")
+        loop.add_signal_handler(signal.SIGINT, _drain, "SIGINT")
+    except (NotImplementedError, RuntimeError):
+        # Not all event loops (e.g. Windows ProactorEventLoop) support
+        # add_signal_handler. The worker survives without the
+        # enhancement.
+        log.info("arq.worker.signal_handlers_unavailable")
+
+
 async def startup(ctx: dict) -> None:
     configure_logging(get_settings().log_level)
+    ctx["draining"] = False
+    _install_signal_handlers(ctx)
     log.info("arq.worker.startup")
 
 
 async def shutdown(ctx: dict) -> None:
-    log.info("arq.worker.shutdown")
+    log.info("arq.worker.shutdown", draining=bool(ctx.get("draining")))
 
 
 async def extract_episode(ctx: dict, *, workspace_id: str, episode_id: str, actor_id: str | None = None) -> dict[str, Any]:
@@ -92,7 +137,45 @@ def _sql(q: str):
     return text(q)
 
 
-from app.workers.crawler import crawl_initial, crawl_incremental, refresh_acl
+async def purge_old_audit_log(ctx: dict) -> dict[str, Any]:
+    """Daily-ish cron: trim audit_log to the retention window.
+
+    Idempotent — running it twice in a row is a no-op.
+    """
+    settings = get_settings()
+    if settings.audit_log_retention_days <= 0:
+        return {"purged": 0, "skipped": "retention disabled"}
+
+    sql = _sql(
+        """
+        DELETE FROM audit_log
+        WHERE created_at < (now() - (CAST(:days AS int) || ' days')::interval)
+        """
+    )
+    async with session_scope() as session:
+        result = await session.execute(
+            sql, {"days": settings.audit_log_retention_days}
+        )
+        purged = result.rowcount or 0
+    log.info(
+        "audit_log.purge.completed",
+        purged=purged,
+        retention_days=settings.audit_log_retention_days,
+    )
+    return {"purged": purged}
+
+
+from arq import cron  # noqa: E402  (registered after job fns are defined)
+
+from app.workers.crawler import (  # noqa: E402
+    crawl_incremental,
+    crawl_initial,
+    refresh_acl,
+)
+from app.workers.export import (  # noqa: E402
+    run_user_export,
+    run_workspace_export,
+)
 
 
 class WorkerSettings:
@@ -102,6 +185,13 @@ class WorkerSettings:
         crawl_initial,
         crawl_incremental,
         refresh_acl,
+        run_workspace_export,
+        run_user_export,
+        purge_old_audit_log,
+    ]
+    cron_jobs = [
+        # 03:17 UTC daily; off-peak.
+        cron(purge_old_audit_log, hour=3, minute=17, run_at_startup=False),
     ]
     on_startup = startup
     on_shutdown = shutdown

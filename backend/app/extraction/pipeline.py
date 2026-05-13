@@ -20,10 +20,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.domain import edge as edge_mod
 from app.domain import entity as entity_mod
+from app.domain import entity_resolver as resolver_mod
 from app.domain import ontology as ontology_mod
+from app.domain import provenance as prov_mod
 from app.llm.embedding import get_embedding_client
 from app.llm.provider import get_llm
 from app.llm.vector_utils import to_pg_vector
@@ -71,9 +74,12 @@ class ExtractionResult:
     created_entities: list[str] = field(default_factory=list)
     resolved_entities: list[str] = field(default_factory=list)
     created_edges: list[str] = field(default_factory=list)
+    pending_facts: list[str] = field(default_factory=list)
+    rejected_facts: list[str] = field(default_factory=list)
     ontology_extended_types: list[str] = field(default_factory=list)
     ontology_extended_relations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    prov_activity_id: str | None = None
 
 
 async def process_episode(
@@ -91,6 +97,32 @@ async def process_episode(
 
     workspace_id = episode["workspace_id"]
     await _mark_status(session, episode_id, "processing")
+
+    settings = get_settings()
+    activity_id = await prov_mod.start_activity(
+        session,
+        workspace_id=workspace_id,
+        kind="extraction",
+        agent_kind="llm",
+        agent_ref=settings.llm_model,
+        agent_version=None,
+        inputs={"episode_id": episode_id},
+    )
+    result.prov_activity_id = activity_id
+
+    # Stamp the episode itself with the activity that processed it. Useful
+    # when the source episode came from a connector (its own connector
+    # activity would already be in prov_activity_id) — we overwrite only
+    # when extraction is the primary producer of the entities it spawned.
+    await session.execute(
+        text(
+            """
+            UPDATE episode SET prov_activity_id = COALESCE(prov_activity_id, :a)
+            WHERE id = :id
+            """
+        ),
+        {"id": episode_id, "a": activity_id},
+    )
 
     settings_row = await session.execute(
         text("SELECT settings FROM workspace WHERE id = :id"),
@@ -144,7 +176,7 @@ async def process_episode(
         # Refresh snapshot after creating types.
         snapshot = await ontology_mod.snapshot(session)
 
-    # Step 2: resolve/create entities.
+    # Step 2: resolve/create entities via the three-tier cascade.
     local_to_entity: dict[str, str] = {}
     for e in extracted.entities:
         type_def = snapshot.type_by_slug(e.type_slug)
@@ -152,33 +184,89 @@ async def process_episode(
             result.errors.append(f"unknown type: {e.type_slug}")
             continue
 
-        existing = await entity_mod.resolve_by_alias(
-            session,
-            workspace_id=workspace_id,
-            name=e.name,
-            type_ref=e.type_slug,
-            similarity_threshold=0.6,
-            limit=1,
+        candidate = resolver_mod.EntityCandidate(
+            canonical=e.name,
+            type_slug=e.type_slug,
+            summary=e.summary,
+            aliases=list(e.aliases),
         )
-        if existing:
-            local_to_entity[e.local_id] = existing[0].id
-            result.resolved_entities.append(existing[0].id)
-            # Extend aliases if new ones are found.
-            current_aliases = set(existing[0].aliases)
-            new_aliases = [a for a in e.aliases if a not in current_aliases and a != existing[0].canonical]
-            if new_aliases:
+        resolution = await resolver_mod.resolve(
+            session, workspace_id=workspace_id, candidate=candidate
+        )
+
+        if resolution.decision == "match" and resolution.entity_id:
+            existing = await entity_mod.get(session, resolution.entity_id)
+            if existing:
+                local_to_entity[e.local_id] = existing.id
+                result.resolved_entities.append(existing.id)
+                current_aliases = set(existing.aliases)
+                new_aliases = [
+                    a for a in e.aliases
+                    if a not in current_aliases and a != existing.canonical
+                ]
+                if new_aliases:
+                    await session.execute(
+                        text(
+                            """
+                            UPDATE entity SET aliases = (
+                              SELECT array_agg(DISTINCT x) FROM unnest(aliases || :new) x
+                            )
+                            WHERE id = :id
+                            """
+                        ),
+                        {"id": existing.id, "new": new_aliases},
+                    )
+                continue
+
+        # Resolver said "uncertain" — there's a plausible-but-not-confident
+        # match. Linking silently would risk merging two real entities;
+        # creating silently would litter the graph with duplicates. The
+        # least-surprising choice: link to the best candidate so downstream
+        # edges have a target, AND write an audit row so a human can
+        # confirm or split later.
+        if (
+            resolution.decision == "uncertain"
+            and resolution.entity_id is not None
+        ):
+            best = await entity_mod.get(session, resolution.entity_id)
+            if best:
+                local_to_entity[e.local_id] = best.id
+                result.resolved_entities.append(best.id)
                 await session.execute(
                     text(
                         """
-                        UPDATE entity SET aliases = (
-                          SELECT array_agg(DISTINCT x) FROM unnest(aliases || :new) x
-                        )
-                        WHERE id = :id
+                        INSERT INTO audit_log
+                          (workspace_id, actor_kind, actor_id, action,
+                           target_kind, target_id, diff)
+                        VALUES (CAST(:ws AS uuid), 'system',
+                                CAST(:actor AS uuid), 'entity.resolver.uncertain',
+                                'entity', CAST(:id AS uuid),
+                                jsonb_build_object(
+                                  'tier', CAST(:tier AS text),
+                                  'score', CAST(:score AS real),
+                                  'rationale', CAST(:rationale AS text),
+                                  'candidate_name', CAST(:cand_name AS text)
+                                ))
                         """
                     ),
-                    {"id": existing[0].id, "new": new_aliases},
+                    {
+                        "ws": workspace_id,
+                        "actor": actor_id,
+                        "id": best.id,
+                        "tier": resolution.tier,
+                        "score": float(resolution.score),
+                        "rationale": resolution.rationale,
+                        "cand_name": e.name,
+                    },
                 )
-            continue
+                log.warning(
+                    "extraction.resolver_uncertain",
+                    candidate=e.name,
+                    matched_to=best.id,
+                    tier=resolution.tier,
+                    score=resolution.score,
+                )
+                continue
 
         # Create new entity.
         try:
@@ -211,7 +299,11 @@ async def process_episode(
         try:
             valid_from_dt = _parse_iso(ex.valid_from) if ex.valid_from else None
             valid_to_dt = _parse_iso(ex.valid_to) if ex.valid_to else None
-            new_edge = await edge_mod.add_fact(
+            # If the LLM didn't provide a confidence, default to 1.0 so
+            # the fact bypasses threshold review (preserves prior behavior
+            # for ontologies where confidence isn't surfaced).
+            confidence = ex.confidence if ex.confidence is not None else 1.0
+            write = await edge_mod.propose_fact(
                 session,
                 workspace_id=workspace_id,
                 subject_id=subj,
@@ -222,15 +314,32 @@ async def process_episode(
                 valid_to=valid_to_dt,
                 source_id=episode_id,
                 source_kind="episode",
-                confidence=ex.confidence,
+                confidence=confidence,
                 created_by=actor_id,
+                prov_activity_id=activity_id,
             )
-            result.created_edges.append(new_edge.id)
+            if write.kind == "edge" and write.edge is not None:
+                result.created_edges.append(write.edge.id)
+            elif write.kind == "pending" and write.pending_fact_id:
+                result.pending_facts.append(write.pending_fact_id)
+            elif write.kind == "rejected" and write.pending_fact_id:
+                result.rejected_facts.append(write.pending_fact_id)
         except Exception as exc:
             result.errors.append(f"edge {ex.fact}: {exc}")
 
     status: Literal["completed", "failed"] = "completed" if not result.errors or result.created_edges or result.created_entities else "failed"
     await _mark_status(session, episode_id, status, error="\n".join(result.errors) if result.errors else None)
+
+    await prov_mod.end_activity(
+        session,
+        activity_id,
+        outputs={
+            "created_edges": result.created_edges,
+            "pending_facts": result.pending_facts,
+            "rejected_facts": result.rejected_facts,
+            "created_entities": result.created_entities,
+        },
+    )
 
     log.info(
         "extraction.episode.done",
@@ -238,6 +347,8 @@ async def process_episode(
         created_entities=len(result.created_entities),
         resolved=len(result.resolved_entities),
         created_edges=len(result.created_edges),
+        pending_facts=len(result.pending_facts),
+        rejected_facts=len(result.rejected_facts),
         errors=len(result.errors),
     )
     return result

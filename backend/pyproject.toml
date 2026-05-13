@@ -101,3 +101,6 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
+markers = [
+    "scenario: enterprise persona scenario tests (Phase K + L). Hit a real Postgres + Redis; slower than unit tests. Run with `pytest -m scenario`.",
+]

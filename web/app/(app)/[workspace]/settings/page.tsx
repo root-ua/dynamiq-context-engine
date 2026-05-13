@@ -229,6 +229,25 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
+          <CardTitle className="text-base">MCP agents</CardTitle>
+          <CardDescription>
+            Mint long-lived tokens to let Claude Code, Cursor, Claude Desktop,
+            the Claude web app, or any other MCP-aware client connect to this
+            workspace.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            variant="outline"
+            onClick={() => router.push(`/${workspace.slug}/settings/agents`)}
+          >
+            Manage agent tokens
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle className="text-base">Data</CardTitle>
           <CardDescription>
             Export every entity, edge, episode, audit row, label, and action

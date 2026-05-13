@@ -696,6 +696,11 @@ export const agentTokensApi = {
       method: "DELETE",
       workspaceId,
     }),
+  rotate: (workspaceId: string, id: string) =>
+    api<AgentTokenCreated>(`/api/agent-tokens/${id}/rotate`, {
+      method: "POST",
+      workspaceId,
+    }),
 };
 
 // ---------------------------------------------------------------------------

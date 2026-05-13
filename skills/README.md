@@ -30,11 +30,13 @@ system prompt. Each skill body is self-contained.
 |---|---|
 | [querying-with-confidence](querying-with-confidence/SKILL.md) | One decision-grade fact (revenue, head count, KPI) with confidence + freshness. |
 | [ingesting-facts](ingesting-facts/SKILL.md) | Push a fact or episode in — choose `add_fact` (atomic) vs `add_episode` (text → extraction). |
+| [document-ingestion](document-ingestion/SKILL.md) | Land facts from a PDF / image / markdown — the agent reads the file, the platform owns the graph. |
 | [agent-to-agent-provenance](agent-to-agent-provenance/SKILL.md) | Cite an upstream agent's activity when deriving a fact. |
 | [governance-labels](governance-labels/SKILL.md) | Apply `pii`, `public`, or custom labels; understand policy drop. |
 | [action-invocation](action-invocation/SKILL.md) | Invoke a kinetic action (`attach_evidence_to_fact`) with idempotency. |
 | [time-travel-queries](time-travel-queries/SKILL.md) | Ask "what did we believe at time T?" via `as_of_query`. |
 | [reviewing-pending-facts](reviewing-pending-facts/SKILL.md) | Walk the proposals queue: approve / reject / supersede. |
+| [connecting-from-external-agent](connecting-from-external-agent/SKILL.md) | Bootstrap Claude Code / Cursor / Claude Desktop / Claude Web / OpenAI Agents SDK against a Dynamiq workspace. |
 
 ## MCP tool ↔ skill matrix
 

@@ -51,6 +51,16 @@ class ExtractedEdge(BaseModel):
     valid_from: str | None = Field(default=None, description="ISO-8601 date or date-time.")
     valid_to: str | None = Field(default=None, description="ISO-8601, inclusive of end.")
     confidence: float | None = Field(default=None, ge=0, le=1)
+    is_negation: bool = Field(
+        default=False,
+        description=(
+            "True when the text asserts this relationship is NOT or "
+            "NO LONGER true (e.g. 'Alice no longer works at Acme'). "
+            "When True, the pipeline closes matching live edges "
+            "instead of creating a new one; ``valid_to`` (if set) is "
+            "used as the moment the relationship stopped."
+        ),
+    )
 
 
 class Extraction(BaseModel):
@@ -65,7 +75,12 @@ Rules:
 - Prefer existing entity and relation types (provided below). Only introduce new slugs if the existing ontology truly cannot express the content.
 - Facts must be grounded in the text. Do NOT invent relationships.
 - Parse dates into ISO-8601 when present; leave `valid_from` null if not stated.
-- Keep `fact` short and natural-language, e.g. "Alice works at Acme"."""
+- Keep `fact` short and natural-language, e.g. "Alice works at Acme".
+
+Negation handling — IMPORTANT:
+- When the text states a relationship has ENDED or is NOT true, still emit an edge for it, but set ``is_negation: true``.
+- Examples: "Bob no longer works at Acme" → edge {subject: bob, predicate: works_at, object: acme, is_negation: true}. "Alice quit Acme on 2025-06-01" → same, with ``valid_to: "2025-06-01"``.
+- A negation closes any matching live edge; do NOT emit it as a positive fact AND a negation."""
 
 
 @dataclass
@@ -74,6 +89,7 @@ class ExtractionResult:
     created_entities: list[str] = field(default_factory=list)
     resolved_entities: list[str] = field(default_factory=list)
     created_edges: list[str] = field(default_factory=list)
+    invalidated_edges: list[str] = field(default_factory=list)
     pending_facts: list[str] = field(default_factory=list)
     rejected_facts: list[str] = field(default_factory=list)
     ontology_extended_types: list[str] = field(default_factory=list)
@@ -343,6 +359,31 @@ async def process_episode(
         try:
             valid_from_dt = _parse_iso(ex.valid_from) if ex.valid_from else None
             valid_to_dt = _parse_iso(ex.valid_to) if ex.valid_to else None
+
+            # Phase PP1 — negation. Close any live edges that match the
+            # extracted triple instead of inserting a new fact. The
+            # LLM tags negations explicitly via ``is_negation``; the
+            # system prompt teaches it the pattern.
+            if ex.is_negation:
+                # Pass the slug so the helper's get_relation_type
+                # resolves to the workspace's own relation row — same
+                # row add_fact wrote against. Using ``relation.id``
+                # from the snapshot could match a different workspace's
+                # copy of the same slug when the DB user bypasses RLS.
+                closed = await edge_mod.invalidate_matching_live(
+                    session,
+                    workspace_id=workspace_id,
+                    subject_id=subj,
+                    predicate=ex.predicate_slug,
+                    object_id=obj,
+                    invalidated_at=valid_to_dt,
+                    reason=f"extracted-negation: {ex.fact}",
+                    actor_kind="system",
+                    actor_id=actor_id,
+                )
+                result.invalidated_edges.extend(closed)
+                continue
+
             # If the LLM didn't provide a confidence, default to 1.0 so
             # the fact bypasses threshold review (preserves prior behavior
             # for ontologies where confidence isn't surfaced).
@@ -371,7 +412,14 @@ async def process_episode(
         except Exception as exc:
             result.errors.append(f"edge {ex.fact}: {exc}")
 
-    status: Literal["completed", "failed"] = "completed" if not result.errors or result.created_edges or result.created_entities else "failed"
+    status: Literal["completed", "failed"] = (
+        "completed"
+        if not result.errors
+        or result.created_edges
+        or result.created_entities
+        or result.invalidated_edges
+        else "failed"
+    )
     await _mark_status(session, episode_id, status, error="\n".join(result.errors) if result.errors else None)
 
     await prov_mod.end_activity(
@@ -379,6 +427,7 @@ async def process_episode(
         activity_id,
         outputs={
             "created_edges": result.created_edges,
+            "invalidated_edges": result.invalidated_edges,
             "pending_facts": result.pending_facts,
             "rejected_facts": result.rejected_facts,
             "created_entities": result.created_entities,
@@ -391,6 +440,7 @@ async def process_episode(
         created_entities=len(result.created_entities),
         resolved=len(result.resolved_entities),
         created_edges=len(result.created_edges),
+        invalidated_edges=len(result.invalidated_edges),
         pending_facts=len(result.pending_facts),
         rejected_facts=len(result.rejected_facts),
         errors=len(result.errors),

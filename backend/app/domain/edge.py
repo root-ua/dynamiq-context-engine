@@ -87,11 +87,18 @@ async def add_fact(
     embed: bool = True,
     run_contradictor: bool = True,
     prov_activity_id: str | None = None,
+    dedup: bool = True,
 ) -> Edge:
     """Insert a new edge, running the contradictor when required.
 
-    Returns the newly inserted edge. If the contradictor closed a prior
-    edge, that closure is recorded in ``audit_log``.
+    Returns the newly inserted edge — or, if ``dedup=True`` (the
+    default) and an exact ``(workspace, subject, predicate, object)``
+    live triple already exists whose ``valid_time`` contains the new
+    ``valid_from``, returns the existing edge unchanged (idempotent).
+    Pass ``dedup=False`` to force a new row.
+
+    If the contradictor closed a prior edge, that closure is recorded
+    in ``audit_log``.
     """
     relation = await ontology_mod.get_relation_type(session, predicate)
     if not relation:
@@ -114,6 +121,54 @@ async def add_fact(
 
     vt_from = valid_from or _utcnow()
     vt_to = valid_to  # None → open (infinity)
+
+    # Advisory lock (Phase PP5) — serialize writes to the same
+    # (workspace, subject, predicate) tuple across workers + REST +
+    # MCP. Transaction-scoped; auto-releases on commit/rollback.
+    # Without this two concurrent extraction workers can both pass
+    # the contradictor check and both INSERT.
+    await session.execute(
+        text(
+            """
+            SELECT pg_advisory_xact_lock(
+              hashtext(CAST(:ws AS text) || ':' || CAST(:s AS text)),
+              hashtext(CAST(:p AS text))
+            )
+            """
+        ),
+        {"ws": workspace_id, "s": subject_id, "p": relation.id},
+    )
+
+    # Write-time exact-triple dedup (Phase PP2). Inside the advisory
+    # lock so two concurrent calls converge on the same existing row.
+    if dedup:
+        existing_row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id::text FROM edge
+                    WHERE workspace_id = CAST(:ws AS uuid)
+                      AND subject_id = CAST(:s AS uuid)
+                      AND predicate_id = CAST(:p AS uuid)
+                      AND object_id = CAST(:o AS uuid)
+                      AND upper(sys_time) = 'infinity'
+                      AND valid_time @> CAST(:vt_from AS timestamptz)
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "ws": workspace_id,
+                    "s": subject_id,
+                    "p": relation.id,
+                    "o": object_id,
+                    "vt_from": vt_from,
+                },
+            )
+        ).first()
+        if existing_row is not None:
+            existing = await get(session, existing_row[0])
+            assert existing is not None
+            return existing
 
     fact_embedding: list[float] | None = None
     if embed:
@@ -262,53 +317,96 @@ async def propose_fact(
         relation_type_id=relation.id,
     )
 
-    # High-stakes contradiction guard: if this fact would close an existing
-    # live edge under cardinality-one, queue it for review regardless of
-    # confidence. Approval re-runs add_fact (which closes the old edge via
-    # the contradictor) under explicit human authorization.
-    if (
-        relation.high_stakes
-        and relation.cardinality_object == "one"
-        and not relation.symmetric
-    ):
+    # Contradiction guard (Phase PP4): if this fact would close an
+    # existing live edge under cardinality-one, decide based on
+    # confidence and the high_stakes flag. Without this, the old
+    # contradictor silently auto-closed the old edge whenever a new
+    # one landed — even if the new one had lower confidence.
+    if relation.cardinality_object == "one" and not relation.symmetric:
         # ``clock_timestamp()`` rather than ``now()`` because both
         # statements may run inside the same transaction — ``now()``
         # returns the transaction start time, which is before the
         # existing edge's ``valid_from`` and would miss the conflict.
-        conflict = await session.execute(
-            text(
-                """
-                SELECT id::text FROM edge
-                WHERE workspace_id = :ws
-                  AND subject_id = :s
-                  AND predicate_id = :p
-                  AND object_id <> :o
-                  AND upper(sys_time) = 'infinity'
-                  AND valid_time @> clock_timestamp()
-                LIMIT 1
-                """
-            ),
-            {"ws": workspace_id, "s": subject_id, "p": relation.id, "o": object_id},
-        )
-        if conflict.first() is not None:
-            pending_id = await proposals_mod.enqueue_pending_fact(
-                session,
-                workspace_id=workspace_id,
-                subject_id=subject_id,
-                predicate_id=relation.id,
-                object_id=object_id,
-                fact=fact,
-                props=props,
-                valid_from=valid_from,
-                valid_to=valid_to,
-                source_id=source_id,
-                source_kind=source_kind,
-                confidence=confidence,
-                prov_activity_id=prov_activity_id,
-                status="pending",
-                reason="high_stakes_contradiction",
+        conflict_row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id::text, confidence FROM edge
+                    WHERE workspace_id = :ws
+                      AND subject_id = :s
+                      AND predicate_id = :p
+                      AND object_id <> :o
+                      AND upper(sys_time) = 'infinity'
+                      AND valid_time @> clock_timestamp()
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "ws": workspace_id,
+                    "s": subject_id,
+                    "p": relation.id,
+                    "o": object_id,
+                },
             )
-            return FactWriteResult(kind="pending", pending_fact_id=pending_id)
+        ).mappings().first()
+
+        if conflict_row is not None:
+            existing_conf = float(conflict_row.get("confidence") or 0.0)
+            # high_stakes: always pending — humans decide which value
+            # is true. Approval re-runs add_fact under explicit auth.
+            if relation.high_stakes:
+                pending_id = await proposals_mod.enqueue_pending_fact(
+                    session,
+                    workspace_id=workspace_id,
+                    subject_id=subject_id,
+                    predicate_id=relation.id,
+                    object_id=object_id,
+                    fact=fact, props=props,
+                    valid_from=valid_from, valid_to=valid_to,
+                    source_id=source_id, source_kind=source_kind,
+                    confidence=confidence,
+                    prov_activity_id=prov_activity_id,
+                    status="pending",
+                    reason="high_stakes_contradiction",
+                )
+                return FactWriteResult(kind="pending", pending_fact_id=pending_id)
+
+            # non-high-stakes: confidence-aware routing.
+            if confidence < existing_conf:
+                pending_id = await proposals_mod.enqueue_pending_fact(
+                    session,
+                    workspace_id=workspace_id,
+                    subject_id=subject_id,
+                    predicate_id=relation.id,
+                    object_id=object_id,
+                    fact=fact, props=props,
+                    valid_from=valid_from, valid_to=valid_to,
+                    source_id=source_id, source_kind=source_kind,
+                    confidence=confidence,
+                    prov_activity_id=prov_activity_id,
+                    status="pending",
+                    reason="lower_confidence_than_live",
+                )
+                return FactWriteResult(kind="pending", pending_fact_id=pending_id)
+            if confidence < existing_conf + 0.1:
+                pending_id = await proposals_mod.enqueue_pending_fact(
+                    session,
+                    workspace_id=workspace_id,
+                    subject_id=subject_id,
+                    predicate_id=relation.id,
+                    object_id=object_id,
+                    fact=fact, props=props,
+                    valid_from=valid_from, valid_to=valid_to,
+                    source_id=source_id, source_kind=source_kind,
+                    confidence=confidence,
+                    prov_activity_id=prov_activity_id,
+                    status="pending",
+                    reason="ambiguous_confidence_contradiction",
+                )
+                return FactWriteResult(kind="pending", pending_fact_id=pending_id)
+            # else: new fact is meaningfully more confident — fall
+            # through to add_fact, which closes the existing via the
+            # cardinality-one cleanup.
 
     # Below the floor — record as auto-rejected for audit, no edge.
     if confidence < thresholds.auto_reject_below:
@@ -412,6 +510,39 @@ async def invalidate(
         {"edge_id": edge_id, "invalid_at": invalid_at},
     )
 
+    # Phase PP2: also close any LIVE duplicates of this same triple
+    # (workspace, subject, predicate, object). Pre-PP2 data and any
+    # external INSERT path that bypassed dedup could leave duplicates
+    # hanging around; without this they'd survive invalidation and
+    # contradict the user's intent. We only close ``sys_time`` for
+    # duplicates — their ``valid_time`` is whatever the duplicate
+    # recorded and we don't want to retcon it (especially if it sits
+    # in the future).
+    dup_rows = (
+        await session.execute(
+            text(
+                """
+                UPDATE edge
+                SET sys_time = tstzrange(lower(sys_time), clock_timestamp(), '[)')
+                WHERE workspace_id = CAST(:ws AS uuid)
+                  AND subject_id = CAST(:s AS uuid)
+                  AND predicate_id = CAST(:p AS uuid)
+                  AND object_id = CAST(:o AS uuid)
+                  AND id <> CAST(:edge_id AS uuid)
+                  AND upper(sys_time) = 'infinity'
+                RETURNING id::text
+                """
+            ),
+            {
+                "ws": existing.workspace_id,
+                "s": existing.subject_id,
+                "p": existing.predicate_id,
+                "o": existing.object_id,
+                "edge_id": edge_id,
+            },
+        )
+    ).scalars().all()
+
     await session.execute(
         text(
             """
@@ -419,7 +550,11 @@ async def invalidate(
                                    target_kind, target_id, diff)
             VALUES (:workspace_id, :actor_kind, :actor_id, 'edge.invalidate',
                     'edge', :edge_id,
-                    jsonb_build_object('reason', CAST(:reason AS text), 'invalidated_at', CAST(:invalid_at AS text)))
+                    jsonb_build_object(
+                      'reason', CAST(:reason AS text),
+                      'invalidated_at', CAST(:invalid_at AS text),
+                      'duplicates_closed', CAST(:dup_count AS int)
+                    ))
             """
         ),
         {
@@ -429,12 +564,106 @@ async def invalidate(
             "edge_id": edge_id,
             "reason": reason,
             "invalid_at": invalid_at.isoformat(),
+            "dup_count": len(dup_rows),
         },
     )
+
+    # Log each closed duplicate separately so audit trails are complete.
+    for dup_id in dup_rows:
+        await session.execute(
+            text(
+                """
+                INSERT INTO audit_log (workspace_id, actor_kind, actor_id, action,
+                                       target_kind, target_id, diff)
+                VALUES (:workspace_id, :actor_kind, :actor_id, 'edge.invalidate',
+                        'edge', CAST(:dup_id AS uuid),
+                        jsonb_build_object(
+                          'reason', CAST(:reason AS text),
+                          'invalidated_at', CAST(:invalid_at AS text)
+                        ))
+                """
+            ),
+            {
+                "workspace_id": existing.workspace_id,
+                "actor_kind": actor_kind,
+                "actor_id": actor_id,
+                "dup_id": dup_id,
+                "reason": f"dup-of-invalidated:{edge_id}",
+                "invalid_at": invalid_at.isoformat(),
+            },
+        )
 
     updated = await get(session, edge_id)
     assert updated is not None
     return updated
+
+
+async def invalidate_matching_live(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    subject_id: str,
+    predicate: str,
+    object_id: str | None = None,
+    invalidated_at: datetime | None = None,
+    reason: str = "extracted-negation",
+    actor_kind: str = "system",
+    actor_id: str | None = None,
+) -> list[str]:
+    """Close all live edges matching the supplied filter.
+
+    Used by the extraction pipeline (Phase PP1) when the LLM tags a
+    fact as a negation — e.g. "Bob no longer works at Acme" closes
+    every live `Bob works_at Acme` edge regardless of confidence.
+
+    If ``object_id`` is None the predicate is closed for any object
+    (e.g. "Bob isn't working anywhere any more" closes every live
+    works_at edge with Bob as subject).
+
+    Returns the list of closed edge ids.
+    """
+    relation = await ontology_mod.get_relation_type(session, predicate)
+    if not relation:
+        raise OntologyError(f"relation type not found: {predicate}")
+
+    params: dict[str, Any] = {
+        "ws": workspace_id,
+        "s": subject_id,
+        "p": relation.id,
+    }
+    obj_clause = ""
+    if object_id is not None:
+        obj_clause = "AND object_id = CAST(:o AS uuid)"
+        params["o"] = object_id
+
+    rows = (
+        await session.execute(
+            text(
+                f"""
+                SELECT id::text FROM edge
+                WHERE workspace_id = CAST(:ws AS uuid)
+                  AND subject_id = CAST(:s AS uuid)
+                  AND predicate_id = CAST(:p AS uuid)
+                  {obj_clause}
+                  AND upper(sys_time) = 'infinity'
+                """
+            ),
+            params,
+        )
+    ).scalars().all()
+
+    closed: list[str] = []
+    for eid in rows:
+        await invalidate(
+            session,
+            edge_id=eid,
+            invalidated_at=invalidated_at,
+            reason=reason,
+            actor_kind=actor_kind,
+            actor_id=actor_id,
+        )
+        closed.append(eid)
+    return closed
 
 
 # ---------------------------------------------------------------------------

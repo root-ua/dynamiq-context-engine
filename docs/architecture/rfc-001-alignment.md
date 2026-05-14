@@ -192,7 +192,23 @@ production-readiness pass).
 - **SpiceDB / OpenFGA** — current per-source-ACL + workspace RLS + label policy covers ~80% of value at <5% of operational cost.
 - **Kafka event substrate** — current Arq queue is sufficient at target scale (§23: 100 QPS sustained).
 - **Connector breadth beyond Drive** — schedule M5-equivalent separately.
-- **Full OWL reasoners, native SPARQL endpoint** — explicit prior. JSON-LD at the API boundary is the standards-compatible escape hatch.
+- **Full OWL reasoners, native SPARQL endpoint** — explicit prior.
+  We sit between RDFS-Plus and OWL 2 RL: typed entities, relation
+  hierarchies, inverse / symmetric / transitive flags. We do NOT
+  ship a SPARQL endpoint or an OWL DL reasoner. JSON-LD at the API
+  boundary is the standards-compatible escape hatch — agents that
+  need a graph view get it via:
+  - `GET /api/entities/{id}` with `Accept: application/ld+json` (the
+    full PROV-O / OWL / SKOS bundle for an entity).
+  - `graph_query` MCP tool — n-hop traversal with predicate / type
+    filters and bi-temporal `as_of_valid`. This is the closest
+    equivalent to SPARQL triple-pattern matching most workloads
+    actually need.
+  - `as_of_query` MCP tool — bi-temporal point-in-time view.
+  If a real SPARQL endpoint is a hard requirement, pair Dynamiq with
+  Cognee or Oxigraph behind a sync job; we'd consider a thin
+  read-side adapter on customer ask, but it's not on the default
+  roadmap.
 - **Block-level ACL** — edges and episodes carry per-fact `allowed_principals[]`; block tables not yet wired.
 
 ## How to verify

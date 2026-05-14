@@ -405,25 +405,30 @@ async def _add_episode(
             occurred_at=p.occurred_at,
             created_by=actor_id,
         )
-        # Episode domain layer doesn't accept prov_activity_id today —
-        # stamp it post-insert so the MCP wrapper keeps the contract.
-        await session.execute(
-            text(
-                "UPDATE episode SET prov_activity_id = CAST(:a AS uuid) "
-                "WHERE id = :id"
-            ),
-            {"a": activity_id, "id": ep.id},
-        )
-        if p.extract:
-            await enqueue_extraction(
-                workspace_id=workspace_id, episode_id=ep.id, actor_id=actor_id,
+        if not ep.deduped:
+            # Episode domain layer doesn't accept prov_activity_id today —
+            # stamp it post-insert so the MCP wrapper keeps the contract.
+            await session.execute(
+                text(
+                    "UPDATE episode SET prov_activity_id = CAST(:a AS uuid) "
+                    "WHERE id = :id"
+                ),
+                {"a": activity_id, "id": ep.id},
             )
+            if p.extract:
+                await enqueue_extraction(
+                    workspace_id=workspace_id, episode_id=ep.id, actor_id=actor_id,
+                )
     finally:
         await prov_mod.end_activity(
             session, activity_id,
             outputs={"episode_id": ep.id} if ep else {"error": "raised"},
         )
-    return {"episode_id": ep.id, "status": ep.processing_status}
+    return {
+        "episode_id": ep.id,
+        "status": ep.processing_status,
+        "deduped": ep.deduped,
+    }
 
 
 async def _update_entity(session: AsyncSession, workspace_id: str, actor_id: str | None, p: UpdateEntityIn) -> dict[str, Any]:

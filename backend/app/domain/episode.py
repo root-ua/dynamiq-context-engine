@@ -1,6 +1,7 @@
 """Episode service — non-lossy ingestion of raw content."""
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +27,16 @@ class Episode:
     content_text: str | None
     processing_status: str
     processing_error: str | None
+    # True when ``add_episode`` short-circuited to an existing row
+    # with the same workspace + content hash. Lets callers (notably
+    # the MCP ``add_episode`` handler) skip re-enqueuing extraction.
+    deduped: bool = False
+
+
+def _content_hash(content_text: str | None) -> bytes:
+    """SHA-256 of the canonical content_text. Workspace-keyed in the
+    DB; same text in different workspaces is allowed."""
+    return hashlib.sha256((content_text or "").encode("utf-8")).digest()
 
 
 async def add_episode(
@@ -41,40 +52,85 @@ async def add_episode(
 ) -> Episode:
     content_text, content_json = _normalize_content(content)
     occurred = occurred_at or datetime.now(UTC)
+    hash_bytes = _content_hash(content_text)
 
-    embedding = None
-    if embed and content_text:
-        try:
-            embedding = await get_embedding_client().embed_one(content_text)
-        except Exception:
-            embedding = None
-
-    episode_id = str(uuid4())
-    await session.execute(
+    # Workspace-scoped content dedup: ON CONFLICT on the
+    # (workspace_id, content_hash) partial unique index. When two
+    # callers race on the same content, exactly one INSERT wins and
+    # the other gets back the existing row.
+    insert_result = await session.execute(
         text(
             """
             INSERT INTO episode
               (id, workspace_id, source_kind, source_ref, occurred_at,
-               content, content_text, content_embedding, processing_status, created_by)
+               content, content_text, processing_status, created_by,
+               content_hash)
             VALUES
               (:id, :workspace_id, :source_kind, :source_ref, :occurred_at,
-               CAST(:content AS jsonb), :content_text,
-               CAST(:embedding AS vector), 'pending', :created_by)
+               CAST(:content AS jsonb), :content_text, 'pending', :created_by,
+               :content_hash)
+            ON CONFLICT (workspace_id, content_hash) WHERE deleted_at IS NULL
+            DO NOTHING
+            RETURNING id::text
             """
         ),
         {
-            "id": episode_id,
+            "id": str(uuid4()),
             "workspace_id": workspace_id,
             "source_kind": source_kind,
             "source_ref": source_ref,
             "occurred_at": occurred,
             "content": json.dumps(content_json),
             "content_text": content_text,
-            "embedding": to_pg_vector(embedding),
             "created_by": created_by,
+            "content_hash": hash_bytes,
         },
     )
-    fetched = await get(session, episode_id)
+    inserted_id = insert_result.scalar_one_or_none()
+
+    if inserted_id is None:
+        # Dedup hit — fetch and return the existing row.
+        existing = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id::text FROM episode
+                    WHERE workspace_id = :ws AND content_hash = :h
+                      AND deleted_at IS NULL
+                    """
+                ),
+                {"ws": workspace_id, "h": hash_bytes},
+            )
+        ).scalar_one()
+        fetched = await get(session, existing)
+        assert fetched is not None
+        fetched.deduped = True
+        return fetched
+
+    # Fresh insert. Compute the embedding now (we couldn't include
+    # it in the INSERT without paying the embedding cost on every
+    # dedup attempt).
+    if embed and content_text:
+        try:
+            embedding = await get_embedding_client().embed_one(content_text)
+            if embedding is not None:
+                await session.execute(
+                    text(
+                        """
+                        UPDATE episode
+                        SET content_embedding = CAST(:embedding AS vector)
+                        WHERE id = CAST(:id AS uuid)
+                        """
+                    ),
+                    {
+                        "id": inserted_id,
+                        "embedding": to_pg_vector(embedding),
+                    },
+                )
+        except Exception:
+            pass
+
+    fetched = await get(session, inserted_id)
     assert fetched is not None
     return fetched
 

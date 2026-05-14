@@ -364,6 +364,26 @@ async def get_edge_provenance(
         doc["wasDerivedFrom"] = derived_nodes[0]
     elif derived_nodes:
         doc["wasDerivedFrom"] = derived_nodes
+
+    # Phase QQ2 — multi-agent endorsement count. The original writer
+    # counts as 1; every dedup pass-through from a different activity
+    # adds another (its activity is recorded as ``derived`` quoting
+    # the original ``upstream``). Validator UI can show "N agents
+    # independently asserted this" without walking the chain.
+    if row["activity_id"]:
+        count_row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*)::int AS n FROM prov_activity_derivation
+                    WHERE upstream_activity_id = CAST(:a AS uuid)
+                      AND derivation_kind = 'quoted'
+                    """
+                ),
+                {"a": row["activity_id"]},
+            )
+        ).mappings().first()
+        doc["dce:endorsementCount"] = (count_row["n"] if count_row else 0) + 1
     return doc
 
 

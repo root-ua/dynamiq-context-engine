@@ -77,6 +77,11 @@ Rules:
 - Parse dates into ISO-8601 when present; leave `valid_from` null if not stated.
 - Keep `fact` short and natural-language, e.g. "Alice works at Acme".
 
+Temporal honesty — IMPORTANT:
+- If the source document carries a date (header, byline, publication date, "as of …"), parse it into ISO-8601 and use it as `valid_from` on facts the document asserts at that date.
+- If a fact is stated as starting before/after that document date ("joined in 2019", "since 2022"), prefer the explicit date over the document date.
+- When extracting from historical documents, DO NOT default `valid_from` to today — leave it null so the system can fall back to the episode's ``occurred_at``. Never invent dates.
+
 Negation handling — IMPORTANT:
 - When the text states a relationship has ENDED or is NOT true, still emit an edge for it, but set ``is_negation: true``.
 - Examples: "Bob no longer works at Acme" → edge {subject: bob, predicate: works_at, object: acme, is_negation: true}. "Alice quit Acme on 2025-06-01" → same, with ``valid_to: "2025-06-01"``.
@@ -359,6 +364,15 @@ async def process_episode(
         try:
             valid_from_dt = _parse_iso(ex.valid_from) if ex.valid_from else None
             valid_to_dt = _parse_iso(ex.valid_to) if ex.valid_to else None
+
+            # Phase QQ1 — temporal honesty. When the LLM didn't extract
+            # an explicit ``valid_from``, fall back to the source
+            # episode's ``occurred_at``, not the ingestion instant. An
+            # onboarding agent reading a 2019 dossier should land facts
+            # at 2019; defaulting to ``now()`` would scribble today's
+            # date over historical truth on the valid-time axis.
+            if valid_from_dt is None and episode.get("occurred_at"):
+                valid_from_dt = _parse_iso(episode["occurred_at"])
 
             # Phase PP1 — negation. Close any live edges that match the
             # extracted triple instead of inserting a new fact. The

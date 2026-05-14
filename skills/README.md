@@ -69,6 +69,8 @@ list_action_invocations   → action-invocation, reviewing-pending-facts
 list_proposals            → reviewing-pending-facts
 approve_proposal          → reviewing-pending-facts
 reject_proposal           → reviewing-pending-facts
+bulk_approve_proposals    → reviewing-pending-facts (validator agent)
+bulk_reject_proposals     → reviewing-pending-facts (validator agent)
 ```
 
 ## Adding a skill

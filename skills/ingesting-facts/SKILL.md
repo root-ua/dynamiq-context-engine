@@ -74,13 +74,23 @@ The pipeline will:
 1. Embed the text for retrieval.
 2. Run an LLM extractor against the workspace's ontology.
 3. Resolve / create entities (Tier-1 external refs → Tier-2 trigram →
-   Tier-3 LLM).
+   Tier-3 llm).
 4. Create edges; `propose_fact` routes low-confidence ones to the
    review queue.
 
 Pass `derived_from_activity_ids` if this episode is itself derived
 from another agent's prior activity — see
 [agent-to-agent-provenance](../agent-to-agent-provenance/SKILL.md).
+
+### When `occurred_at` matters: temporal honesty
+
+`occurred_at` is the document's authoring date, not the ingestion
+instant. When the extraction LLM doesn't pull an explicit
+`valid_from` off the text, the pipeline falls back to this value.
+Ingesting a 2019 memo without setting `occurred_at` lands every
+extracted fact at "today" on the valid-time axis — historical truth
+gets scribbled over with the present. See
+[document-ingestion](../document-ingestion/SKILL.md#mining-historical-documents-temporal-honesty).
 
 ## Corrections after the fact
 
@@ -106,5 +116,8 @@ distinguishes the two.
 - Don't loop calling `add_fact` for facts that came from the same
   document — one `add_episode` + extraction is cheaper, captures the
   source, and chains provenance correctly.
-- Don't push the same episode twice. The platform doesn't dedupe by
-  text content; you'll get duplicate extraction activities.
+- Don't worry about pushing the same episode text twice: the
+  platform dedupes by SHA-256 of `content_text` per workspace and
+  short-circuits to the existing row (the response's
+  `episode.deduped` will be true). You won't get duplicate
+  extraction activities.

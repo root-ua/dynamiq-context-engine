@@ -146,7 +146,7 @@ async def add_fact(
             await session.execute(
                 text(
                     """
-                    SELECT id::text FROM edge
+                    SELECT id::text, prov_activity_id::text FROM edge
                     WHERE workspace_id = CAST(:ws AS uuid)
                       AND subject_id = CAST(:s AS uuid)
                       AND predicate_id = CAST(:p AS uuid)
@@ -168,6 +168,60 @@ async def add_fact(
         if existing_row is not None:
             existing = await get(session, existing_row[0])
             assert existing is not None
+            existing_activity_id = existing_row[1]
+            # Phase QQ2 — record multi-agent endorsement. When a second
+            # caller asserts a triple another agent already wrote, the
+            # write returns the same edge (PP2 dedup) but we now also
+            # log the new caller's activity as an upstream of the
+            # existing edge's activity. Validator UI can then surface
+            # "this fact has N independent endorsements" without losing
+            # the second writer's audit trail. ``kind='quoted'`` —
+            # "asserted without transformation" — fits the semantic.
+            if (
+                prov_activity_id
+                and existing_activity_id
+                and prov_activity_id != existing_activity_id
+            ):
+                from app.domain import provenance as _prov_mod
+
+                try:
+                    # B's new activity quotes A's original activity.
+                    # ``derived`` = B (the one doing the asserting now);
+                    # ``upstream`` = A (the original writer).
+                    await _prov_mod.link_derivation(
+                        session,
+                        workspace_id=workspace_id,
+                        derived_activity_id=prov_activity_id,
+                        upstream_activity_id=existing_activity_id,
+                        kind="quoted",
+                    )
+                except ValueError:
+                    # Self-link or invalid kind — both impossible given
+                    # the != guard above and the hard-coded ``quoted``.
+                    pass
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO audit_log
+                          (workspace_id, actor_kind, actor_id, action,
+                           target_kind, target_id, diff)
+                        VALUES (CAST(:ws AS uuid), 'system',
+                                CAST(:actor AS uuid), 'edge.endorsed',
+                                'edge', CAST(:edge AS uuid),
+                                jsonb_build_object(
+                                  'endorsing_activity', CAST(:new_act AS text),
+                                  'original_activity', CAST(:orig_act AS text)
+                                ))
+                        """
+                    ),
+                    {
+                        "ws": workspace_id,
+                        "actor": created_by,
+                        "edge": existing.id,
+                        "new_act": prov_activity_id,
+                        "orig_act": existing_activity_id,
+                    },
+                )
             return existing
 
     fact_embedding: list[float] | None = None

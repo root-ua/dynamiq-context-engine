@@ -55,11 +55,14 @@ def test_tool_catalog_has_all_22_tools():
         "propose_ontology", "as_of_query",
         "get_provenance", "get_fact",
         "list_proposals", "approve_proposal",
-        "reject_proposal", "list_labels", "assign_label",
+        "reject_proposal",
+        # Phase QQ3 — validator-friendly batch tools.
+        "bulk_approve_proposals", "bulk_reject_proposals",
+        "list_labels", "assign_label",
         "list_action_types", "execute_action", "list_action_invocations",
     }
     assert set(TOOLS_BY_NAME.keys()) == expected
-    assert len(TOOLS) == 22
+    assert len(TOOLS) == 24
 
 
 def test_every_tool_schema_is_valid_json_schema():
@@ -144,6 +147,10 @@ def _minimal_input_for(tool_name: str, ctx: dict) -> dict:
         return {"proposal_id": ctx["pending_id"]}
     if tool_name == "reject_proposal":
         return {"proposal_id": ctx["other_pending_id"], "reason": "test"}
+    if tool_name == "bulk_approve_proposals":
+        return {"ids": [ctx["bulk_approve_id"]], "comment": "test"}
+    if tool_name == "bulk_reject_proposals":
+        return {"ids": [ctx["bulk_reject_id"]], "reason": "test"}
     if tool_name == "list_labels":
         return {}
     if tool_name == "assign_label":
@@ -225,6 +232,28 @@ async def mcp_ctx(enterprise_workspace):
             confidence=0.5,
             created_by=e.alice.id,
         )
+        # Two more pending facts dedicated to the bulk_* MCP smoke
+        # tests (separate so they don't collide with approve/reject).
+        eve = await entity_mod.create(
+            session, workspace_id=ws_id, type_ref="person",
+            canonical="L3 Eve", embed=False,
+        )
+        frank = await entity_mod.create(
+            session, workspace_id=ws_id, type_ref="person",
+            canonical="L3 Frank", embed=False,
+        )
+        p3 = await edge_mod.propose_fact(
+            session, workspace_id=ws_id,
+            subject_id=eve.id, predicate="knows", object_id=frank.id,
+            fact="L3 Eve knows L3 Frank",
+            confidence=0.5, created_by=e.alice.id,
+        )
+        p4 = await edge_mod.propose_fact(
+            session, workspace_id=ws_id,
+            subject_id=frank.id, predicate="knows", object_id=eve.id,
+            fact="L3 Frank knows L3 Eve",
+            confidence=0.5, created_by=e.alice.id,
+        )
 
     return {
         "workspace_id": ws_id,
@@ -235,6 +264,8 @@ async def mcp_ctx(enterprise_workspace):
         "episode_id": ep.id,
         "pending_id": p1.pending_fact_id,
         "other_pending_id": p2.pending_fact_id,
+        "bulk_approve_id": p3.pending_fact_id,
+        "bulk_reject_id": p4.pending_fact_id,
     }
 
 

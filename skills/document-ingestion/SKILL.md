@@ -59,6 +59,43 @@ within 1–5 seconds. To follow up: call `search_memory({"query":
 expected facts landed. Or call `get_provenance(edge_id)` on a
 specific edge to see the chain back to your episode.
 
+## Mining historical documents: temporal honesty
+
+If you're reading an OLD document — a 2019 board memo, a 2012
+contract, an archival LinkedIn snapshot — the date that matters is
+the document's date, NOT today.
+
+Two levers control where the fact lands on the `valid_time` axis:
+
+1. **`add_episode.occurred_at`** — pass the document's authoring
+   date (publication date, byline, header). When the extraction
+   LLM doesn't emit an explicit `valid_from`, the pipeline now
+   falls back to this `occurred_at` instead of today.
+2. **Explicit `valid_from` in the extracted edge** — if a fact
+   inside the doc names its own date ("Alice joined in 2015"),
+   that wins over `occurred_at`. The LLM's system prompt teaches
+   it to parse and emit explicit dates.
+
+```json
+{
+  "tool": "add_episode",
+  "arguments": {
+    "content": "<2019 board memo text>",
+    "source_kind": "agent",
+    "occurred_at": "2019-03-15T00:00:00Z"
+  }
+}
+```
+
+The resulting facts land at 2019-03-15 on the valid-time axis, not
+today — historical queries (`as_of_query(valid_at='2019-06-01')`)
+will surface them; current queries (`live_edges`) won't, unless a
+later fact extends or replaces them.
+
+**Don't** leave `occurred_at` unset when ingesting historical data —
+the platform defaults it to ingestion time, which scribbles today's
+date over actual history.
+
 ## `add_fact` — atomic-triple path
 
 For pre-resolved facts:

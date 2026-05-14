@@ -158,6 +158,16 @@ only if you need to tighten or relax the defaults.
 | `RERANKER_TOP_N` | `30` | How many top fused candidates pass through the reranker before MMR. |
 | `AUDIT_LOG_RETENTION_DAYS` | `365` | Daily cron purges `audit_log` rows older than this. Set to `0` to disable. |
 | `WORKER_DRAIN_SECONDS` | `30` | Cap on graceful drain after SIGTERM; the Arq worker exits hard after this. |
+
+### Per-workspace settings (JSONB on `workspace.settings`)
+
+- `edge_retention_days` — closed-edge retention window (Phase QQ4).
+  Daily cron `purge_closed_edges` (03:43 UTC) hard-deletes edges
+  whose `sys_time` was closed more than N days ago. `0` (default)
+  disables purge for that workspace. Provenance (`prov_activity`,
+  `audit_log`) survives. Set via `PATCH /api/workspaces/:id`
+  or the workspace settings page.
+
 | `PLAYGROUND_MODEL` | `claude-sonnet-4-6` | Model used by the chat-style playground page. |
 | `MCP_RATE_LIMIT_RPM` | `60` | In-memory per-token requests-per-minute cap on `/api/mcp/*`. Set to `0` to disable. |
 

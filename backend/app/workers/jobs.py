@@ -165,6 +165,48 @@ async def purge_old_audit_log(ctx: dict) -> dict[str, Any]:
     return {"purged": purged}
 
 
+async def purge_closed_edges(ctx: dict) -> dict[str, Any]:
+    """Hard-delete edges closed more than ``edge_retention_days`` ago.
+
+    Phase QQ4 — bound the live-edge index size. Bi-temporal closed
+    edges (``upper(sys_time) <> 'infinity'``) accumulate forever
+    otherwise. ``workspace.settings.edge_retention_days`` is the
+    per-workspace knob; ``0`` (the default) disables purge for that
+    workspace.
+
+    Provenance is NOT lost: ``prov_activity`` and ``audit_log`` rows
+    survive — only the edge row goes. PROV-O queries against the
+    activity still return the agent/episode chain; the fact value
+    is gone, but the audit trail isn't.
+
+    Idempotent.
+    """
+    sql = _sql(
+        """
+        WITH ws AS (
+          SELECT id,
+                 COALESCE((settings->>'edge_retention_days')::int, 0) AS days
+          FROM workspace
+          WHERE COALESCE((settings->>'edge_retention_days')::int, 0) > 0
+        ),
+        doomed AS (
+          SELECT e.id
+          FROM edge e
+          JOIN ws ON ws.id = e.workspace_id
+          WHERE upper(e.sys_time) <> 'infinity'
+            AND upper(e.sys_time)
+                < now() - (ws.days || ' days')::interval
+        )
+        DELETE FROM edge WHERE id IN (SELECT id FROM doomed)
+        """
+    )
+    async with session_scope() as session:
+        result = await session.execute(sql)
+        purged = result.rowcount or 0
+    log.info("edge.purge.completed", purged=purged)
+    return {"purged": purged}
+
+
 from arq import cron  # noqa: E402  (registered after job fns are defined)
 
 from app.workers.export import (  # noqa: E402
@@ -180,10 +222,13 @@ class WorkerSettings:
         run_workspace_export,
         run_user_export,
         purge_old_audit_log,
+        purge_closed_edges,
     ]
     cron_jobs = [
         # 03:17 UTC daily; off-peak.
         cron(purge_old_audit_log, hour=3, minute=17, run_at_startup=False),
+        # 03:43 UTC daily; offset from audit purge to avoid contention.
+        cron(purge_closed_edges, hour=3, minute=43, run_at_startup=False),
     ]
     on_startup = startup
     on_shutdown = shutdown

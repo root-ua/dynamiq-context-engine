@@ -54,6 +54,14 @@ class PendingFact:
     reviewed_at: str | None
     approved_edge_id: str | None
     created_at: str
+    # Phase QQ3 — triage-validator enrichment. None when the underlying
+    # row is missing the join target (e.g. ad-hoc fact with no activity).
+    proposer_kind: str | None = None
+    proposer_agent_ref: str | None = None
+    proposer_email: str | None = None
+    source_episode_snippet: str | None = None
+    upstream_activity_ids: list[str] | None = None
+    triggered_by_user_id: str | None = None
 
 
 @dataclass
@@ -285,6 +293,9 @@ async def list_proposals(
         where.append("pf.source_kind = :src_kind")
         params["src_kind"] = source_kind
 
+    # Phase QQ3 — enrichment via LEFT JOINs so the validator has all
+    # the triage context in one call (proposer identity, episode
+    # snippet, upstream activity chain, episode trigger user).
     sql = f"""
         SELECT
           pf.id::text, pf.workspace_id::text,
@@ -296,8 +307,28 @@ async def list_proposals(
           pf.prov_activity_id::text, pf.status, pf.reason,
           pf.reviewed_by::text, pf.reviewed_at::text,
           pf.approved_edge_id::text,
-          pf.created_at::text
+          pf.created_at::text,
+          pa.agent_kind            AS proposer_kind,
+          pa.agent_ref             AS proposer_agent_ref,
+          au.email                 AS proposer_email,
+          LEFT(COALESCE(ep.content_text, ''), 200) AS source_episode_snippet,
+          COALESCE(
+            (
+              SELECT array_agg(upstream_activity_id::text)
+              FROM prov_activity_derivation pad
+              WHERE pad.derived_activity_id = pa.id
+            ),
+            ARRAY[]::text[]
+          )                        AS upstream_activity_ids,
+          ep.created_by::text      AS triggered_by_user_id
         FROM pending_fact pf
+        LEFT JOIN prov_activity pa ON pa.id = pf.prov_activity_id
+        LEFT JOIN app_user au
+          ON pa.agent_kind IN ('user', 'system')
+         AND au.id::text = pa.agent_ref
+        LEFT JOIN episode ep
+          ON pf.source_kind = 'episode'
+         AND ep.id::text = pf.source_id::text
         WHERE {' AND '.join(where)}
         ORDER BY pf.created_at DESC
         LIMIT :limit OFFSET :offset
@@ -514,6 +545,7 @@ async def reject_proposal(
 # ---------------------------------------------------------------------------
 
 def _row_to_pending(row: Any) -> PendingFact:
+    upstream = row.get("upstream_activity_ids")
     return PendingFact(
         id=row["id"],
         workspace_id=row["workspace_id"],
@@ -534,6 +566,12 @@ def _row_to_pending(row: Any) -> PendingFact:
         reviewed_at=row.get("reviewed_at"),
         approved_edge_id=row.get("approved_edge_id"),
         created_at=row["created_at"],
+        proposer_kind=row.get("proposer_kind"),
+        proposer_agent_ref=row.get("proposer_agent_ref"),
+        proposer_email=row.get("proposer_email"),
+        source_episode_snippet=row.get("source_episode_snippet") or None,
+        upstream_activity_ids=list(upstream) if upstream else [],
+        triggered_by_user_id=row.get("triggered_by_user_id"),
     )
 
 

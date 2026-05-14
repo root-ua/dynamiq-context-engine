@@ -186,6 +186,39 @@ production-readiness pass).
   cron (`AUDIT_LOG_RETENTION_DAYS`); structlog PII redaction processor;
   one-off `backfill_actions` script for pre-Phase-D workspaces.
 
+## Phase QQ — multi-agent ingestion hardening
+
+Pass targeted at the failure modes that surface when many agents
+simultaneously mine historical data:
+
+- **Temporal honesty (QQ1).** Extraction pipeline now falls back to
+  `episode.occurred_at` for `valid_from` when the LLM didn't extract
+  an explicit date. The `SYSTEM_PROMPT` was extended with a
+  "temporal honesty" section that tells the model to parse document
+  dates rather than default to today.
+- **Multi-agent consensus on dedup (QQ2).** When `add_fact` returns
+  an existing edge via PP2 dedup, the new caller's activity is
+  linked to the original via `prov_activity_derivation`
+  (`kind='quoted'`) and an `edge.endorsed` audit row is written.
+  `get_edge_provenance` surfaces a `dce:endorsementCount`.
+- **Triage enrichment + bulk MCP (QQ3).** `list_proposals` returns
+  proposer kind / email / agent_ref, source-episode snippet,
+  upstream activity ids, and the user who triggered ingestion. New
+  MCP tools `bulk_approve_proposals` / `bulk_reject_proposals`
+  (REST equivalents already existed) for validator agents doing
+  map-reduce triage.
+- **Closed-edge retention (QQ4).** New Arq cron `purge_closed_edges`
+  hard-deletes edges with `upper(sys_time) <` retention window.
+  Per-workspace `workspace.settings.edge_retention_days`; default
+  `0` (= disabled). Provenance (`prov_activity`, `audit_log`) is
+  preserved across purge.
+- **Skills.** `document-ingestion`, `ingesting-facts`,
+  `reviewing-pending-facts` updated with temporal-honesty guidance
+  and the validator-agent map-reduce pattern.
+
+No DB migration. Reuses `workspace.settings` JSONB,
+`prov_activity_derivation`, `audit_log`.
+
 ## Out of scope (explicit deferrals)
 
 - **Leiden/Louvain community subgraph**, intent-driven candidate routing.

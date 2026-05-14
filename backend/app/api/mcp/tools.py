@@ -197,6 +197,16 @@ class RejectProposalIn(BaseModel):
     reason: str = Field(..., min_length=1, max_length=2000)
 
 
+class BulkApproveProposalsIn(BaseModel):
+    ids: list[str] = Field(..., min_length=1, max_length=500)
+    comment: str | None = None
+
+
+class BulkRejectProposalsIn(BaseModel):
+    ids: list[str] = Field(..., min_length=1, max_length=500)
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
 class ListLabelsIn(BaseModel):
     pass
 
@@ -747,6 +757,70 @@ async def _reject_proposal(session: AsyncSession, workspace_id: str, actor_id: s
     return asdict(rejected)
 
 
+async def _bulk_approve_proposals(
+    session: AsyncSession,
+    workspace_id: str,
+    actor_id: str | None,
+    p: BulkApproveProposalsIn,
+) -> dict[str, Any]:
+    """Phase QQ3 — validator-friendly batch approval. Loops the
+    per-proposal approve so all cardinality + contradictor invariants
+    still fire. Returns per-id result + counts.
+    """
+    results: list[dict[str, Any]] = []
+    approved = 0
+    failed = 0
+    for pid in p.ids:
+        try:
+            edge = await proposals_mod.approve_proposal(
+                session,
+                proposal_id=pid,
+                principal_user_id=actor_id,
+                comment=p.comment,
+            )
+            results.append(
+                {"id": pid, "ok": True, "approved_edge_id": edge.id}
+            )
+            approved += 1
+        except proposals_mod.ProposalError as exc:
+            results.append({"id": pid, "ok": False, "error": str(exc)})
+            failed += 1
+    return {
+        "results": results,
+        "approved_count": approved,
+        "failed_count": failed,
+    }
+
+
+async def _bulk_reject_proposals(
+    session: AsyncSession,
+    workspace_id: str,
+    actor_id: str | None,
+    p: BulkRejectProposalsIn,
+) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    rejected = 0
+    failed = 0
+    for pid in p.ids:
+        try:
+            await proposals_mod.reject_proposal(
+                session,
+                proposal_id=pid,
+                principal_user_id=actor_id,
+                reason=p.reason,
+            )
+            results.append({"id": pid, "ok": True})
+            rejected += 1
+        except proposals_mod.ProposalError as exc:
+            results.append({"id": pid, "ok": False, "error": str(exc)})
+            failed += 1
+    return {
+        "results": results,
+        "rejected_count": rejected,
+        "failed_count": failed,
+    }
+
+
 async def _as_of_query(session: AsyncSession, workspace_id: str, actor_id: str | None, p: AsOfIn, principal: Principal) -> dict[str, Any]:
     subject_id: str | None = None
     if p.subject:
@@ -791,9 +865,11 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(name="as_of_query", description="Query edges as they were at a past valid time (bi-temporal as-of query).", input_schema=AsOfIn, handler=_as_of_query),
     ToolSpec(name="get_provenance", description="Return W3C PROV-O JSON-LD for a fact (edge), including the activity that produced it, the agent (LLM / user / system), and the source episode it was derived from.", input_schema=GetProvenanceIn, handler=_get_provenance),
     ToolSpec(name="get_fact", description="Decision-support shortcut: return one structured fact for (subject, predicate) with confidence, freshness, label slugs, and provenance attached. Returns {error: 'no_fact'} when no live edge exists, or {multiple: true, candidates: [...]} when the subject has several values and ``object`` was not provided.", input_schema=GetFactIn, handler=_get_fact),
-    ToolSpec(name="list_proposals", description="List facts in the review queue (pending / approved / rejected / superseded). Use this to surface low-confidence extractions that need human approval.", input_schema=ListProposalsIn, handler=_list_proposals),
+    ToolSpec(name="list_proposals", description="List facts in the review queue (pending / approved / rejected / superseded), enriched with proposer identity (agent kind / email), source-episode snippet, upstream activity ids, and the user who triggered ingestion. Use to surface low-confidence extractions for triage.", input_schema=ListProposalsIn, handler=_list_proposals),
     ToolSpec(name="approve_proposal", description="Approve a pending fact and promote it to a live edge. Reuses the same cardinality / contradictor invariants as direct fact insertion.", input_schema=ApproveProposalIn, handler=_approve_proposal),
     ToolSpec(name="reject_proposal", description="Reject a pending fact with a written reason. The proposal stays as audit evidence; no edge is created.", input_schema=RejectProposalIn, handler=_reject_proposal),
+    ToolSpec(name="bulk_approve_proposals", description="Approve up to 500 pending facts in one call. Per-proposal failures don't abort the batch; the response itemises each id with ok/error and totals (approved_count, failed_count). Designed for validator agents doing map-reduce triage.", input_schema=BulkApproveProposalsIn, handler=_bulk_approve_proposals),
+    ToolSpec(name="bulk_reject_proposals", description="Reject up to 500 pending facts in one call with a shared reason. Returns per-id ok/error and totals.", input_schema=BulkRejectProposalsIn, handler=_bulk_reject_proposals),
     ToolSpec(name="list_labels", description="List all sensitivity labels in the workspace, with their hierarchical paths and metadata. Use to discover label slugs before assigning.", input_schema=ListLabelsIn, handler=_list_labels),
     ToolSpec(name="assign_label", description="Assign a sensitivity label to an edge or episode. The label and target must already exist; label policies are re-evaluated at retrieval time.", input_schema=AssignLabelIn, handler=_assign_label),
     ToolSpec(name="list_action_types", description="List the registered kinetic action types in the workspace (catalog). Returns input_schema, required_role, idempotency requirements, and declared side_effects.", input_schema=ListActionTypesIn, handler=_list_action_types),

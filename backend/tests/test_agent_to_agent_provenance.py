@@ -36,6 +36,15 @@ async def test_add_fact_records_derivation_link(two_people):
             s, workspace_id=ws_id, type_ref="person",
             canonical="Bob A2A", embed=False,
         )
+        # Agent B's derived fact targets a distinct entity so the
+        # write isn't a symmetric mirror of Agent A's edge — the
+        # ``edge_mirror_inverse`` DB trigger auto-creates the
+        # symmetric inverse for ``knows``, which dedup correctly
+        # treats as the same fact.
+        acme = await entity_mod.create(
+            s, workspace_id=ws_id, type_ref="organization",
+            canonical="Acme A2A", embed=False,
+        )
 
         # Agent A writes a primary fact.
         result_a = await invoke_tool(
@@ -58,15 +67,16 @@ async def test_add_fact_records_derivation_link(two_people):
             )
         ).scalar_one()
 
-        # Meta-agent B writes a derived fact citing A's activity.
+        # Meta-agent B writes a non-symmetric-mirror derived fact citing
+        # A's activity (different subject + predicate).
         result_b = await invoke_tool(
             s, workspace_id=ws_id, actor_id=user_id,
             name="add_fact",
             arguments={
                 "subject": bob.id,
-                "predicate": "knows",
-                "object": two_people["alice"],
-                "fact": "Bob knows Alice (derived from observation)",
+                "predicate": "member_of",
+                "object": acme.id,
+                "fact": "Bob is a member of Acme (derived from observation)",
                 "derived_from_activity_ids": [a_activity_id],
             },
             principal=principal,

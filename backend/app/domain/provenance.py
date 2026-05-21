@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from app.auth.jwt import Principal
 
 PROV_CONTEXT: dict[str, Any] = {
     "@context": {
@@ -255,17 +258,46 @@ async def derivation_chain(
 
 
 async def get_edge_provenance(
-    session: AsyncSession, edge_id: str
+    session: AsyncSession,
+    edge_id: str,
+    *,
+    principal: "Principal | None" = None,
 ) -> dict[str, Any] | None:
     """Return PROV-O JSON-LD describing an edge's provenance.
 
     Includes the activity that generated it, the agent associated with
     the activity, and (if present) the source episode it was derived from.
+
+    Visibility: the edge itself is filtered through ``edge_visibility_clause``
+    — invisible edges return None (404 at the REST layer). The derived
+    source episode is redacted to ``{redacted: true, kind: 'episode'}``
+    if it exists but the caller can't see it under source ACL.
     """
+    # Apply edge visibility — invisible edges look like 404, not 403, so
+    # we don't leak existence. Episode visibility is checked separately
+    # because a fact may be visible (via workspace-trust on a manual ingest)
+    # while its source episode has ACL — surface a redacted placeholder
+    # instead of removing the relation.
+    from app.auth.acl import edge_visibility_clause, episode_visibility_clause
+    from app.auth.external_acl import resolve_user_identities
+
+    identities = (
+        await resolve_user_identities(session, principal)
+        if principal is not None
+        else None
+    )
+
+    edge_acl = edge_visibility_clause(
+        principal, edge_alias="e", identities=identities
+    )
+    edge_params: dict[str, Any] = {"id": edge_id}
+    for k, v in edge_acl._bindparams.items():
+        edge_params[k] = v.value
+
     row = (
         await session.execute(
             text(
-                """
+                f"""
                 SELECT
                   e.id::text AS edge_id,
                   e.fact,
@@ -288,15 +320,33 @@ async def get_edge_provenance(
                 LEFT JOIN prov_activity a ON a.id = e.prov_activity_id
                 LEFT JOIN episode ep ON ep.id = e.source_id
                   AND e.source_kind = 'episode'
-                WHERE e.id = :id
+                WHERE e.id = :id AND ({edge_acl.text})
                 """
             ),
-            {"id": edge_id},
+            edge_params,
         )
     ).mappings().first()
 
     if not row:
         return None
+
+    # Episode redaction check — only meaningful when the row carried one.
+    episode_visible = True
+    if row["episode_id"] is not None and principal is not None:
+        ep_acl = episode_visibility_clause(
+            principal, episode_alias="ep", identities=identities
+        )
+        ep_params: dict[str, Any] = {"id": row["episode_id"]}
+        for k, v in ep_acl._bindparams.items():
+            ep_params[k] = v.value
+        ep_row = await session.execute(
+            text(
+                f"SELECT 1 FROM episode ep WHERE ep.id = CAST(:id AS uuid) "
+                f"AND ({ep_acl.text}) LIMIT 1"
+            ),
+            ep_params,
+        )
+        episode_visible = ep_row.first() is not None
 
     doc: dict[str, Any] = dict(PROV_CONTEXT)
     doc["@id"] = f"dce:edge/{row['edge_id']}"
@@ -326,14 +376,26 @@ async def get_edge_provenance(
         doc["wasAttributedTo"] = agent_node
     derived_nodes: list[dict[str, Any]] = []
     if row["episode_id"]:
-        derived_nodes.append(
-            {
-                "@id": f"dce:episode/{row['episode_id']}",
-                "@type": ["Entity", "dce:Episode"],
-                "dce:snippet": row["episode_snippet"],
-                "dce:sourceKind": row["episode_source_kind"],
-            }
-        )
+        if episode_visible:
+            derived_nodes.append(
+                {
+                    "@id": f"dce:episode/{row['episode_id']}",
+                    "@type": ["Entity", "dce:Episode"],
+                    "dce:snippet": row["episode_snippet"],
+                    "dce:sourceKind": row["episode_source_kind"],
+                }
+            )
+        else:
+            # Source episode exists but the caller can't see it under
+            # source ACL. Surface a redaction marker so the chain isn't
+            # silently empty.
+            derived_nodes.append(
+                {
+                    "@type": ["Entity", "dce:Episode"],
+                    "dce:redacted": True,
+                    "dce:redactionReason": "source_acl",
+                }
+            )
 
     # Agent-to-agent derivations (Phase O3): if this edge's activity
     # was informed by other activities, surface them as additional
@@ -368,12 +430,29 @@ async def get_edge_provenance(
 
 
 async def get_episode_provenance(
-    session: AsyncSession, episode_id: str
+    session: AsyncSession,
+    episode_id: str,
+    *,
+    principal: "Principal | None" = None,
 ) -> dict[str, Any] | None:
+    from app.auth.acl import episode_visibility_clause
+    from app.auth.external_acl import resolve_user_identities
+
+    identities = (
+        await resolve_user_identities(session, principal)
+        if principal is not None
+        else None
+    )
+    acl = episode_visibility_clause(
+        principal, episode_alias="ep", identities=identities
+    )
+    params: dict[str, Any] = {"id": episode_id}
+    for k, v in acl._bindparams.items():
+        params[k] = v.value
     row = (
         await session.execute(
             text(
-                """
+                f"""
                 SELECT
                   ep.id::text AS episode_id,
                   LEFT(COALESCE(ep.content_text, ''), 200) AS snippet,
@@ -386,10 +465,10 @@ async def get_episode_provenance(
                   a.ended_at::text AS activity_ended_at
                 FROM episode ep
                 LEFT JOIN prov_activity a ON a.id = ep.prov_activity_id
-                WHERE ep.id = :id
+                WHERE ep.id = :id AND ({acl.text})
                 """
             ),
-            {"id": episode_id},
+            params,
         )
     ).mappings().first()
 

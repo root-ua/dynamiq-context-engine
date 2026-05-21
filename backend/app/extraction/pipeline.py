@@ -64,8 +64,13 @@ Rules:
 - Use `local_id` labels to connect the same entity across facts — keep them short and lowercase.
 - Prefer existing entity and relation types (provided below). Only introduce new slugs if the existing ontology truly cannot express the content.
 - Facts must be grounded in the text. Do NOT invent relationships.
-- Parse dates into ISO-8601 when present; leave `valid_from` null if not stated.
-- Keep `fact` short and natural-language, e.g. "Alice works at Acme"."""
+- Keep `fact` short and natural-language, e.g. "Alice works at Acme".
+
+Date / valid_time rules:
+- Parse dates explicit in the text into ISO-8601 and put them in `valid_from` / `valid_to`.
+- If the fact is ongoing/present-tense (e.g. "Lina leads product"), set `valid_from` to the REFERENCE_TIME provided below — that's when the document was authored.
+- If the text says a transition happens on a specific date (e.g. "effective 2026-05-21, X replaces Y"), set the NEW fact's `valid_from` to that date.
+- Leave `valid_from` null only if the fact has no date AND no reference time was provided."""
 
 
 @dataclass
@@ -150,6 +155,7 @@ async def process_episode(
         extracted = await _run_llm(
             snapshot=snapshot,
             text_=episode["content_text"] or "",
+            reference_time=episode.get("occurred_at"),
         )
     except Exception as exc:
         await _mark_status(session, episode_id, "failed", error=str(exc))
@@ -329,6 +335,13 @@ async def process_episode(
         except Exception as exc:
             result.errors.append(f"entity {e.name}: {exc}")
 
+    # Default for valid_from when the LLM didn't extract an explicit date
+    # from the text: anchor to the source episode's occurred_at (the doc's
+    # Drive modifiedTime). That's the Graphiti pattern — "if no event-time
+    # was stated, use the document's own reference time, not ingestion now()."
+    # Falls back to now() only if the episode also has no occurred_at.
+    episode_occurred_at = _parse_iso(episode["occurred_at"]) if episode.get("occurred_at") else None
+
     # Step 3: create edges.
     for ex in extracted.edges:
         subj = local_to_entity.get(ex.subject_local_id)
@@ -342,6 +355,9 @@ async def process_episode(
             continue
         try:
             valid_from_dt = _parse_iso(ex.valid_from) if ex.valid_from else None
+            if valid_from_dt is None:
+                # No date in the LLM output — anchor to the source doc.
+                valid_from_dt = episode_occurred_at
             valid_to_dt = _parse_iso(ex.valid_to) if ex.valid_to else None
             # If the LLM didn't provide a confidence, default to 1.0 so
             # the fact bypasses threshold review (preserves prior behavior
@@ -402,7 +418,12 @@ async def process_episode(
 # LLM call
 # ---------------------------------------------------------------------------
 
-async def _run_llm(*, snapshot: ontology_mod.OntologySnapshot, text_: str) -> Extraction:
+async def _run_llm(
+    *,
+    snapshot: ontology_mod.OntologySnapshot,
+    text_: str,
+    reference_time: str | None = None,
+) -> Extraction:
     existing_types = "\n".join(
         f"- {t.slug}"
         + (f" (extends {next((x.slug for x in snapshot.types if x.id == t.extends_id), 'thing')})"
@@ -415,18 +436,26 @@ async def _run_llm(*, snapshot: ontology_mod.OntologySnapshot, text_: str) -> Ex
         for r in snapshot.relations
     ) or "(none)"
 
+    ref_block = (
+        f"REFERENCE_TIME (the document's authored date — use this as valid_from "
+        f"for any ongoing/present-tense fact that doesn't carry its own date):\n"
+        f"{reference_time}\n\n"
+        if reference_time else ""
+    )
+
     user_prompt = (
         "Available entity types:\n"
         f"{existing_types}\n\n"
         "Available relation types:\n"
         f"{existing_rels}\n\n"
+        f"{ref_block}"
         "Text to extract from:\n---\n"
         f"{text_}\n---"
     )
     llm = get_llm()
     return await llm.structured(
         schema=Extraction, system=SYSTEM_PROMPT, user=user_prompt,
-        temperature=0.1, max_tokens=4000,
+        temperature=0.1, max_tokens=16000,
     )
 
 

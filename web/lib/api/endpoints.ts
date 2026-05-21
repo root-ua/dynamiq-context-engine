@@ -5,12 +5,16 @@ import type {
   AuditEntry,
   Document,
   DocumentRevision,
+  DriveTree,
   Edge,
   Entity,
   EntityType,
   Episode,
   ExportJob,
   ExtractionPolicy,
+  GoogleDocSyncState,
+  GoogleDocsSyncJob,
+  GoogleDriveConnectionSummary,
   GraphPayload,
   Label,
   LabelPolicy,
@@ -82,6 +86,12 @@ export const workspacesApi = {
   remove: (id: string, slug: string) =>
     api<void>(`/api/workspaces/${id}`, {
       method: "DELETE",
+      body: { slug },
+      workspaceId: id,
+    }),
+  debugReset: (id: string, slug: string) =>
+    api<Record<string, number>>(`/api/workspaces/${id}/debug-reset`, {
+      method: "POST",
       body: { slug },
       workspaceId: id,
     }),
@@ -406,6 +416,14 @@ export const entitiesApi = {
 // ---------------------------------------------------------------------------
 
 export const edgesApi = {
+  /** Earliest + latest valid_time across the workspace's live edges. Used
+   *  by the as-of time slider to pick its scrub range without paginating
+   *  every edge. */
+  timeBounds: (workspaceId: string) =>
+    api<{ min_valid_from: string | null; max_valid_from: string | null }>(
+      "/api/edges/time-bounds",
+      { workspaceId },
+    ),
   create: (
     workspaceId: string,
     data: {
@@ -613,6 +631,26 @@ export const graphApi = {
       body: data,
       workspaceId,
     }),
+  /** Whole-workspace dump (capped). No seed required. Mirrors the filter
+   *  surface of `traverse` so the same filter UI works in both modes. */
+  all: (
+    workspaceId: string,
+    opts: {
+      maxNodes?: number;
+      types?: string[];
+      predicates?: string[];
+      asOfValid?: string | null;
+    } = {},
+  ) => {
+    const params = new URLSearchParams();
+    params.set("max_nodes", String(opts.maxNodes ?? 500));
+    for (const t of opts.types ?? []) params.append("types", t);
+    for (const p of opts.predicates ?? []) params.append("predicates", p);
+    if (opts.asOfValid) params.set("as_of_valid", opts.asOfValid);
+    return api<GraphPayload>(`/api/graph/all?${params.toString()}`, {
+      workspaceId,
+    });
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -1008,4 +1046,126 @@ export const exportsApi = {
     }),
   startMe: () => api<ExportJob>("/api/me/export", { method: "POST" }),
   pollMe: (jobId: string) => api<ExportJob>(`/api/me/export/${jobId}`),
+};
+
+// ---------------------------------------------------------------------------
+// Integrations — Google Docs (v1, "Connect + manual sync")
+//
+// Mirrors backend/app/api/rest/integrations_google_docs.py one-for-one.
+// The OAuth handshake itself happens via plain redirect — call
+// authorize() to get the URL, then `window.location.href = url`.
+// ---------------------------------------------------------------------------
+
+export const googleDocsApi = {
+  /** POST /authorize — returns the Google OAuth URL to redirect the browser to. */
+  authorize: (workspaceId: string, returnTo?: string) =>
+    api<{ authorize_url: string }>("/api/integrations/google-docs/authorize", {
+      method: "POST",
+      body: { return_to: returnTo ?? "/integrations/google-docs" },
+      workspaceId,
+    }),
+  listConnections: (workspaceId: string) =>
+    api<{ data: GoogleDriveConnectionSummary[] }>(
+      "/api/integrations/google-docs/connections",
+      { workspaceId },
+    ),
+  revokeConnection: (workspaceId: string, connectionId: string) =>
+    api<{ status: string }>(
+      `/api/integrations/google-docs/connections/${connectionId}`,
+      { method: "DELETE", workspaceId },
+    ),
+  /** Lazy-loaded Drive tree (one parent per call). */
+  tree: (workspaceId: string, connectionId: string, parent = "root") =>
+    api<DriveTree>(
+      `/api/integrations/google-docs/connections/${connectionId}/tree?parent=${encodeURIComponent(
+        parent,
+      )}`,
+      { workspaceId },
+    ),
+  saveSelection: (
+    workspaceId: string,
+    connectionId: string,
+    selection: {
+      folders: Array<{ id: string; name: string }>;
+      files: Array<{ id: string; name: string }>;
+    },
+  ) =>
+    api<GoogleDriveConnectionSummary>(
+      `/api/integrations/google-docs/connections/${connectionId}/selection`,
+      { method: "PUT", body: selection, workspaceId },
+    ),
+  startSync: (workspaceId: string, connectionId: string) =>
+    api<{ data: GoogleDocsSyncJob }>(
+      `/api/integrations/google-docs/connections/${connectionId}/sync`,
+      { method: "POST", workspaceId },
+    ),
+  getJob: (workspaceId: string, jobId: string) =>
+    api<{ data: GoogleDocsSyncJob }>(
+      `/api/integrations/google-docs/jobs/${jobId}`,
+      { workspaceId },
+    ),
+  listDocs: (workspaceId: string, connectionId: string) =>
+    api<{ data: GoogleDocSyncState[] }>(
+      `/api/integrations/google-docs/connections/${connectionId}/documents`,
+      { workspaceId },
+    ),
+};
+
+// ---------------------------------------------------------------------------
+// Integrations: permissions inspector
+// ---------------------------------------------------------------------------
+
+export interface PermissionAce {
+  ace_kind: "anyone" | "domain" | "user" | "group";
+  email: string | null;
+  domain: string | null;
+  role: string;
+  provider: string;
+  source_doc_id: string;
+  synced_at: string;
+}
+
+export interface PermissionEpisode {
+  id: string;
+  source_kind: string;
+  source_ref: string | null;
+  ingested_at: string;
+  snippet: string;
+  aces: PermissionAce[];
+  visible_to_user_ids: string[];
+  ace_summary: {
+    anyone: number;
+    domain: number;
+    user: number;
+    group: number;
+  };
+}
+
+export interface PermissionMember {
+  user_id: string;
+  user_email: string;
+  role: string;
+  google_emails: string[];
+  google_domains: string[];
+}
+
+export interface PermissionMatrix {
+  members: PermissionMember[];
+  episodes: PermissionEpisode[];
+}
+
+export const permissionsApi = {
+  list: (
+    workspaceId: string,
+    opts?: { onlyWithAcl?: boolean; limit?: number },
+  ) => {
+    const params = new URLSearchParams();
+    if (opts?.onlyWithAcl === false) params.set("only_with_acl", "false");
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return api<PermissionMatrix>(
+      `/api/integrations/permissions${qs ? `?${qs}` : ""}`,
+      { workspaceId },
+    );
+  },
 };

@@ -12,6 +12,7 @@ import {
   PiKey,
   PiLightning,
   PiMagnifyingGlass,
+  PiPlugsConnected,
   PiShapes,
 } from "react-icons/pi";
 
@@ -47,6 +48,16 @@ export function getNavGroups(workspaceSlug: string): NavGroup[] {
         },
         { href: `${base}/graph`, label: "Graph", icon: PiGraph },
         { href: `${base}/episodes`, label: "Episodes", icon: PiCalendarBlank },
+      ],
+    },
+    {
+      label: "Sources",
+      items: [
+        {
+          href: `${base}/integrations`,
+          label: "Integrations",
+          icon: PiPlugsConnected,
+        },
       ],
     },
     {

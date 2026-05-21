@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.acl import edge_visibility_clause, episode_visibility_clause
+from app.auth.external_acl import UserIdentities, resolve_user_identities
 from app.auth.jwt import Principal
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -58,23 +59,33 @@ async def search(
     except Exception:
         embedding = None
 
+    # Resolve caller's external identities once — every ACL-aware
+    # subquery below reuses the same emails/domains. Service principals
+    # and unauthenticated contexts get empty lists and the filter
+    # degrades to `TRUE` (workspace RLS does the work).
+    identities = (
+        await resolve_user_identities(session, principal)
+        if principal is not None
+        else None
+    )
+
     candidates: list[list[SearchResult]] = []
 
     if "entity" in include_kinds:
         candidates.append(await _entity_vector(session, workspace_id, embedding, entity_type))
         candidates.append(await _entity_text(session, workspace_id, query, entity_type))
     if "edge" in include_kinds:
-        candidates.append(await _edge_vector(session, workspace_id, embedding, as_of_valid, principal=principal))
-        candidates.append(await _edge_text(session, workspace_id, query, as_of_valid, principal=principal))
+        candidates.append(await _edge_vector(session, workspace_id, embedding, as_of_valid, principal=principal, identities=identities))
+        candidates.append(await _edge_text(session, workspace_id, query, as_of_valid, principal=principal, identities=identities))
     if "episode" in include_kinds:
-        candidates.append(await _episode_vector(session, workspace_id, embedding, principal=principal))
-        candidates.append(await _episode_text(session, workspace_id, query, principal=principal))
+        candidates.append(await _episode_vector(session, workspace_id, embedding, principal=principal, identities=identities))
+        candidates.append(await _episode_text(session, workspace_id, query, principal=principal, identities=identities))
     if "block" in include_kinds:
         candidates.append(await _block_text(session, workspace_id, query))
 
     fused = _rrf(candidates, k=settings.hybrid_rrf_k)
     if graph_expand and fused:
-        fused = await _graph_expand(session, workspace_id, fused, limit=limit * 2, principal=principal)
+        fused = await _graph_expand(session, workspace_id, fused, limit=limit * 2, principal=principal, identities=identities)
 
     # Pipeline order:
     #   1. Label-policy filter — drop sensitive results before any
@@ -325,6 +336,7 @@ async def _entity_text(
 async def _edge_vector(
     session: AsyncSession, workspace_id: str, embedding: list[float] | None,
     as_of_valid: str | None, *, principal: Principal | None = None,
+    identities: UserIdentities | None = None,
 ) -> list[SearchResult]:
     if embedding is None:
         return []
@@ -339,7 +351,9 @@ async def _edge_vector(
 
     acl_filter = ""
     if principal is not None:
-        clause = edge_visibility_clause(principal, edge_alias="e")
+        clause = edge_visibility_clause(
+            principal, edge_alias="e", identities=identities
+        )
         acl_filter = f"AND ({clause.text})"
         for k, v in clause._bindparams.items():
             params[k] = v.value
@@ -384,6 +398,7 @@ async def _edge_vector(
 async def _edge_text(
     session: AsyncSession, workspace_id: str, query: str,
     as_of_valid: str | None, *, principal: Principal | None = None,
+    identities: UserIdentities | None = None,
 ) -> list[SearchResult]:
     """Trigram + ILIKE fallback for edges.
 
@@ -406,7 +421,9 @@ async def _edge_text(
 
     acl_filter = ""
     if principal is not None:
-        clause = edge_visibility_clause(principal, edge_alias="e")
+        clause = edge_visibility_clause(
+            principal, edge_alias="e", identities=identities
+        )
         acl_filter = f"AND ({clause.text})"
         for k, v in clause._bindparams.items():
             params[k] = v.value
@@ -451,6 +468,7 @@ async def _edge_text(
 async def _episode_vector(
     session: AsyncSession, workspace_id: str, embedding: list[float] | None,
     *, principal: Principal | None = None,
+    identities: UserIdentities | None = None,
 ) -> list[SearchResult]:
     if embedding is None:
         return []
@@ -461,7 +479,9 @@ async def _episode_vector(
     }
     acl_filter = ""
     if principal is not None:
-        clause = episode_visibility_clause(principal, episode_alias="episode")
+        clause = episode_visibility_clause(
+            principal, episode_alias="episode", identities=identities
+        )
         acl_filter = f"AND ({clause.text})"
         for k, v in clause._bindparams.items():
             params[k] = v.value
@@ -494,6 +514,7 @@ async def _episode_vector(
 async def _episode_text(
     session: AsyncSession, workspace_id: str, query: str,
     *, principal: Principal | None = None,
+    identities: UserIdentities | None = None,
 ) -> list[SearchResult]:
     params: dict[str, Any] = {
         "workspace_id": workspace_id,
@@ -503,7 +524,9 @@ async def _episode_text(
     }
     acl_filter = ""
     if principal is not None:
-        clause = episode_visibility_clause(principal, episode_alias="episode")
+        clause = episode_visibility_clause(
+            principal, episode_alias="episode", identities=identities
+        )
         acl_filter = f"AND ({clause.text})"
         for k, v in clause._bindparams.items():
             params[k] = v.value
@@ -638,6 +661,7 @@ async def _graph_expand(
     *,
     limit: int,
     principal: Principal | None = None,
+    identities: UserIdentities | None = None,
 ) -> list[SearchResult]:
     entity_ids = [r.id for r in results if r.kind == "entity"][:10]
     if not entity_ids:
@@ -650,7 +674,9 @@ async def _graph_expand(
     }
     acl_filter = ""
     if principal is not None:
-        clause = edge_visibility_clause(principal, edge_alias="e")
+        clause = edge_visibility_clause(
+            principal, edge_alias="e", identities=identities
+        )
         acl_filter = f"AND ({clause.text})"
         for k, v in clause._bindparams.items():
             params[k] = v.value

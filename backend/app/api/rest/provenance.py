@@ -24,7 +24,7 @@ async def edge_provenance(
 ) -> dict[str, Any]:
     if not principal.workspace_id:
         raise HTTPException(400, "workspace required")
-    doc = await prov_mod.get_edge_provenance(session, edge_id)
+    doc = await prov_mod.get_edge_provenance(session, edge_id, principal=principal)
     if not doc:
         raise HTTPException(404, "edge not found")
     return doc
@@ -36,7 +36,7 @@ async def episode_provenance(
 ) -> dict[str, Any]:
     if not principal.workspace_id:
         raise HTTPException(400, "workspace required")
-    doc = await prov_mod.get_episode_provenance(session, episode_id)
+    doc = await prov_mod.get_episode_provenance(session, episode_id, principal=principal)
     if not doc:
         raise HTTPException(404, "episode not found")
     return doc

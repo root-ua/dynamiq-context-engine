@@ -6,7 +6,9 @@ import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import {
   PiWarning as AlertTriangle,
   PiGraph as Network,
+  PiGlobe as Globe,
   PiFadersHorizontal as Filters,
+  PiX as XIcon,
 } from "react-icons/pi";
 
 import { Button } from "@/components/ui/button";
@@ -57,12 +59,38 @@ export default function GraphPage() {
   const [filters, setFilters] =
     React.useState<GraphFiltersValue>(DEFAULT_FILTERS);
   const [selectedNode, setSelectedNode] = React.useState<string | null>(null);
+  // "Show whole graph" mode — bypasses seeds and pulls everything via
+  // /api/graph/all. Default to true so the page shows something immediately
+  // on landing; users opt INTO seed-based traversal by picking a seed.
+  const [showAll, setShowAll] = React.useState(true);
 
   const workspaceId = workspace?.id ?? "";
   const workspaceSlug = workspace?.slug ?? "";
 
   const seedIds = React.useMemo(() => seeds.map((s) => s.id), [seeds]);
 
+  // Whole-graph query — disabled unless showAll is on. Filters mirror
+  // the seed-based traversal so the same sidebar UI controls both modes.
+  const allGraph = useQuery({
+    queryKey: [
+      "graph.all",
+      workspaceId,
+      MAX_NODES,
+      filters.types,
+      filters.predicates,
+      filters.asOf,
+    ],
+    enabled: !!workspaceId && showAll,
+    queryFn: () =>
+      graphApi.all(workspaceId, {
+        maxNodes: MAX_NODES,
+        types: filters.types.length ? filters.types : undefined,
+        predicates: filters.predicates.length ? filters.predicates : undefined,
+        asOfValid: filters.asOf ?? undefined,
+      }),
+  });
+
+  // Seed-rooted traversal — disabled when showAll is on or no seeds picked.
   const traversal = useQuery({
     queryKey: [
       "graph.traverse",
@@ -74,7 +102,7 @@ export default function GraphPage() {
       filters.types,
       filters.asOf,
     ],
-    enabled: !!workspaceId && seedIds.length > 0,
+    enabled: !!workspaceId && seedIds.length > 0 && !showAll,
     queryFn: () =>
       graphApi.traverse(workspaceId, {
         seeds: seedIds,
@@ -87,18 +115,46 @@ export default function GraphPage() {
       }),
   });
 
+  // Unified view-result the canvas reads — whichever mode is active wins.
+  const activeQuery: UseQueryResult<GraphPayload, Error> = showAll
+    ? allGraph
+    : traversal;
+
+  // Hide orphan entities (no edges) from the viz. Extraction sometimes
+  // leaves these behind when the ontology guard rejects all their edges,
+  // and they render as isolated grey dots that look like junk.
+  // In seed-rooted mode, the seed itself can be orphan-in-the-result if
+  // no edges came back — keep seeds regardless so the user sees what
+  // they asked for.
+  const filteredPayload: GraphPayload | undefined = React.useMemo(() => {
+    const payload = activeQuery.data;
+    if (!payload) return payload;
+    const connected = new Set<string>();
+    for (const e of payload.edges) {
+      connected.add(e.subject_id);
+      connected.add(e.object_id);
+    }
+    const seedSet = new Set(seedIds);
+    return {
+      ...payload,
+      nodes: payload.nodes.filter(
+        (n) => connected.has(n.id) || seedSet.has(n.id),
+      ),
+    };
+  }, [activeQuery.data, seedIds]);
+
   React.useEffect(() => {
-    if (traversal.isError) {
+    if (activeQuery.isError) {
       push({
-        title: "Graph traversal failed",
+        title: showAll ? "Failed to load full graph" : "Graph traversal failed",
         description:
-          traversal.error instanceof Error
-            ? traversal.error.message
+          activeQuery.error instanceof Error
+            ? activeQuery.error.message
             : "Unknown error",
         variant: "destructive",
       });
     }
-  }, [traversal.isError, traversal.error, push]);
+  }, [activeQuery.isError, activeQuery.error, push, showAll]);
 
   // Esc clears selection.
   React.useEffect(() => {
@@ -119,6 +175,9 @@ export default function GraphPage() {
     setSeeds((prev) =>
       prev.some((s) => s.id === seed.id) ? prev : [...prev, seed],
     );
+    // Picking a seed implies "I want to explore from here" — switch out
+    // of whole-graph view to a seed-rooted traversal.
+    setShowAll(false);
     setSelectedNode(null);
   }, []);
 
@@ -128,12 +187,15 @@ export default function GraphPage() {
 
   const focusOn = React.useCallback(
     (nodeId: string) => {
-      const node = traversal.data?.nodes.find((n) => n.id === nodeId);
+      const payload = activeQuery.data;
+      const node = payload?.nodes.find((n) => n.id === nodeId);
       if (!node) return;
+      // Focusing a node implicitly switches off whole-graph mode and seeds it.
+      setShowAll(false);
       setSeeds([{ id: node.id, canonical: node.canonical, type: node.type }]);
       setSelectedNode(null);
     },
-    [traversal.data],
+    [activeQuery.data],
   );
 
   if (!workspace) {
@@ -163,6 +225,11 @@ export default function GraphPage() {
         onFiltersChange={setFilters}
         onAddSeed={addSeed}
         onRemoveSeed={removeSeed}
+        showAll={showAll}
+        onToggleShowAll={() => {
+          setShowAll((prev: boolean) => !prev);
+          setSelectedNode(null);
+        }}
       />
       <div className="flex min-h-0 flex-1">
         <aside className="hidden w-72 shrink-0 border-r md:block">
@@ -177,7 +244,12 @@ export default function GraphPage() {
           <GraphCanvas
             workspaceId={workspaceId}
             seeds={seeds}
-            traversal={traversal}
+            showAll={showAll}
+            payload={filteredPayload}
+            isLoading={activeQuery.isLoading}
+            isError={activeQuery.isError}
+            error={activeQuery.error}
+            onRetry={() => activeQuery.refetch()}
             selectedNode={selectedNode}
             onNodeClick={handleNodeClick}
             onCanvasClick={handleCanvasClick}
@@ -192,7 +264,7 @@ export default function GraphPage() {
                 workspaceId={workspaceId}
                 workspaceSlug={workspaceSlug}
                 nodeId={selectedNode}
-                payload={traversal.data}
+                payload={activeQuery.data}
                 onClose={() => setSelectedNode(null)}
                 onFocus={focusOn}
               />
@@ -202,7 +274,7 @@ export default function GraphPage() {
                 workspaceId={workspaceId}
                 workspaceSlug={workspaceSlug}
                 nodeId={selectedNode}
-                payload={traversal.data}
+                payload={activeQuery.data}
                 onClose={() => setSelectedNode(null)}
                 onFocus={focusOn}
               />
@@ -225,6 +297,8 @@ function TopBar({
   onFiltersChange,
   onAddSeed,
   onRemoveSeed,
+  showAll,
+  onToggleShowAll,
 }: {
   workspaceId: string;
   seeds: SeedEntity[];
@@ -232,6 +306,8 @@ function TopBar({
   onFiltersChange: (v: GraphFiltersValue) => void;
   onAddSeed: (s: SeedEntity) => void;
   onRemoveSeed: (id: string) => void;
+  showAll: boolean;
+  onToggleShowAll: () => void;
 }) {
   return (
     <div className="flex flex-col gap-2 border-b bg-background px-4 py-3">
@@ -247,6 +323,27 @@ function TopBar({
             onRemove={onRemoveSeed}
           />
         </div>
+        <Button
+          variant={showAll ? "default" : "outline"}
+          size="sm"
+          onClick={onToggleShowAll}
+          className="shrink-0 gap-1.5"
+          title={
+            showAll
+              ? "Switch back to seed-based traversal"
+              : "Show every entity in this workspace (capped at 500)"
+          }
+        >
+          {showAll ? (
+            <>
+              <XIcon className="h-3.5 w-3.5" /> Exit full graph
+            </>
+          ) : (
+            <>
+              <Globe className="h-3.5 w-3.5" /> Show whole graph
+            </>
+          )}
+        </Button>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <Dialog>
@@ -302,7 +399,12 @@ function TopBar({
 function GraphCanvas({
   workspaceId,
   seeds,
-  traversal,
+  showAll,
+  payload,
+  isLoading,
+  isError,
+  error,
+  onRetry,
   selectedNode,
   onNodeClick,
   onCanvasClick,
@@ -310,33 +412,39 @@ function GraphCanvas({
 }: {
   workspaceId: string;
   seeds: SeedEntity[];
-  traversal: UseQueryResult<GraphPayload, Error>;
+  showAll: boolean;
+  payload: GraphPayload | undefined;
+  isLoading: boolean;
+  isError: boolean;
+  error: Error | null;
+  onRetry: () => void;
   selectedNode: string | null;
   onNodeClick: (id: string) => void;
   onCanvasClick: () => void;
   onAddSeed: (s: SeedEntity) => void;
 }) {
-  if (seeds.length === 0) {
+  // Whole-graph mode: no seeds required. Seed-based mode: prompt for one.
+  if (!showAll && seeds.length === 0) {
     return <EmptyGraphState workspaceId={workspaceId} onAddSeed={onAddSeed} />;
   }
 
-  if (traversal.isLoading) {
+  if (isLoading) {
     return <SkeletonCanvas />;
   }
 
-  if (traversal.isError) {
+  if (isError) {
     return (
       <div className="flex flex-1 items-center justify-center p-8">
         <EmptyState
           icon={AlertTriangle}
           title="Failed to load graph"
           description={
-            traversal.error instanceof Error
-              ? traversal.error.message
+            error instanceof Error
+              ? error.message
               : "An unexpected error occurred while traversing the graph."
           }
           action={
-            <Button size="sm" onClick={() => traversal.refetch()}>
+            <Button size="sm" onClick={onRetry}>
               Retry
             </Button>
           }
@@ -345,14 +453,21 @@ function GraphCanvas({
     );
   }
 
-  const payload = traversal.data;
   if (!payload || payload.nodes.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center p-8">
         <EmptyState
           icon={Network}
-          title="No connected entities"
-          description="The selected seeds have no edges matching the current filters. Try loosening filters or increasing max hops."
+          title={
+            showAll
+              ? "No entities in this workspace yet"
+              : "No connected entities"
+          }
+          description={
+            showAll
+              ? "Ingest content (Google Docs sync, agent writes, etc.) and refresh."
+              : "The selected seeds have no edges matching the current filters. Try loosening filters or increasing max hops."
+          }
         />
       </div>
     );

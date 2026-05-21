@@ -19,7 +19,7 @@ class EntityJudgment(BaseModel):
         ..., description="Whether the two entities denote the same real-world thing."
     )
     confidence: float = Field(..., ge=0, le=1)
-    rationale: str = Field(..., max_length=300)
+    rationale: str = Field(..., max_length=600)
 
 
 SYSTEM_PROMPT = """You decide whether two short entity descriptions refer to the same real-world thing (same person, same organization, same project, etc.).
@@ -29,7 +29,9 @@ Output exactly one decision:
 - "no_match" — different things, with at least 0.7 confidence.
 - "uncertain" — under 0.7 confidence either way.
 
-Be conservative: if the canonical names look similar but the contexts disagree (different roles, different employers, different time-spans), prefer "no_match" or "uncertain"."""
+Be conservative: if the canonical names look similar but the contexts disagree (different roles, different employers, different time-spans), prefer "no_match" or "uncertain".
+
+Keep the rationale to one short sentence (under 30 words)."""
 
 
 async def judge_pair(

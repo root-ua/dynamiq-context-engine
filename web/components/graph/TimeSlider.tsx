@@ -30,26 +30,29 @@ export function TimeSlider({
   onChange,
   className,
 }: TimeSliderProps) {
+  // Cheap aggregate from the backend (was: fetch every edge and reduce
+  // client-side, which made the slider laggy on large workspaces and
+  // capped the max at "now" so future-valid facts were unreachable).
   const rangeQuery = useQuery({
     queryKey: ["graph.time-range", workspaceId],
-    queryFn: () => edgesApi.list(workspaceId, {}),
+    queryFn: () => edgesApi.timeBounds(workspaceId),
     enabled: !!workspaceId,
-    select: (edges) => {
-      if (!edges.length) return null;
-      let min = Number.POSITIVE_INFINITY;
-      for (const e of edges) {
-        const t = Date.parse(e.valid_from);
-        if (Number.isFinite(t) && t < min) min = t;
-      }
-      if (!Number.isFinite(min)) return null;
-      return { min, max: Date.now() };
+    select: (b) => {
+      if (!b) return null;
+      const min = b.min_valid_from ? Date.parse(b.min_valid_from) : null;
+      const max = b.max_valid_from ? Date.parse(b.max_valid_from) : null;
+      if (min === null || max === null) return null;
+      return { min, max };
     },
   });
 
   const range = rangeQuery.data;
-  const fallbackMin = Date.now() - 1000 * 60 * 60 * 24 * 30;
+  // Sensible fallback when the workspace has zero edges: a 30-day window
+  // ending today, so the slider at least renders.
+  const fallbackMax = Date.now();
+  const fallbackMin = fallbackMax - 1000 * 60 * 60 * 24 * 30;
   const min = range?.min ?? fallbackMin;
-  const max = range?.max ?? Date.now();
+  const max = range?.max ?? fallbackMax;
   const isLive = value === null;
   const current = value ? Date.parse(value) : max;
 

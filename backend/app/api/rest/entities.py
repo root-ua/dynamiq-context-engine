@@ -4,6 +4,7 @@ from dataclasses import asdict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import text
 
 from app.api.content_negotiation import accept_jsonld
 from app.api.rest.schemas import (
@@ -13,7 +14,9 @@ from app.api.rest.schemas import (
     EntityOut,
     EntityUpdate,
 )
+from app.auth.acl import edge_visibility_clause
 from app.auth.deps import CurrentPrincipal, DbSession
+from app.auth.external_acl import resolve_user_identities
 from app.domain import edge as edge_mod
 from app.domain import entity as entity_mod
 from app.domain import entity_resolver as resolver_mod
@@ -27,7 +30,7 @@ router = APIRouter(prefix="/entities", tags=["entities"])
 
 @router.get("")
 async def list_entities(
-    _: CurrentPrincipal,
+    principal: CurrentPrincipal,
     session: DbSession,
     type: str | None = Query(default=None),
     query: str | None = Query(default=None),
@@ -40,6 +43,11 @@ async def list_entities(
         include_subtypes=include_subtypes,
         limit=limit, offset=offset,
     )
+    if principal.kind == "user":
+        visible = await _filter_visible_entity_ids(
+            session, [i.id for i in items], principal
+        )
+        items = [i for i in items if i.id in visible]
     return [EntityOut(**asdict(i)) for i in items]
 
 
@@ -68,13 +76,18 @@ async def create(
 @router.get("/{ref}")
 async def get(
     ref: str,
-    _: CurrentPrincipal,
+    principal: CurrentPrincipal,
     session: DbSession,
     jsonld: Annotated[bool, Depends(accept_jsonld)] = False,
 ) -> dict[str, Any] | EntityOut:
     ent = await entity_mod.get(session, ref)
     if not ent:
         raise HTTPException(404, "entity not found")
+    # 404 (not 403) for ACL-hidden entities to avoid leaking existence.
+    if principal.kind == "user":
+        visible = await _filter_visible_entity_ids(session, [ent.id], principal)
+        if ent.id not in visible:
+            raise HTTPException(404, "entity not found")
     if jsonld:
         snapshot = await ontology_mod.snapshot(session)
         refs = await resolver_mod.list_external_refs(session, entity_id=ent.id)
@@ -187,3 +200,46 @@ async def merge(
         actor_id=principal.user_id,
     )
     return EntityOut(**asdict(result))
+
+
+async def _filter_visible_entity_ids(
+    session: DbSession,
+    entity_ids: list[str],
+    principal: CurrentPrincipal,
+) -> set[str]:
+    """Return the subset of entity_ids that the caller can see.
+
+    Rule: an entity is visible iff at least one attaching edge is visible.
+    An edge is visible iff its source episode passes the source-ACL filter
+    (workspace-trust fallback applies when the source episode has no ACL).
+
+    Entities with zero attaching edges are treated as hidden — they only
+    arise from extraction where every fact about the entity was rejected
+    by the ontology guard. Surfacing them in autocomplete leaks their
+    name (the original bug). If a fresh entity-creation flow needs them
+    visible, add an exception once we have a real use case.
+    """
+    if not entity_ids or principal.kind != "user":
+        return set(entity_ids)
+    identities = await resolve_user_identities(session, principal)
+    edge_acl = edge_visibility_clause(
+        principal, edge_alias="ed", identities=identities,
+    )
+    params: dict[str, object] = {"ids": entity_ids}
+    for key, value in edge_acl._bindparams.items():
+        params[key] = value.value
+    rows = await session.execute(
+        text(
+            f"""
+            SELECT DISTINCT ent_id::text AS id FROM (
+              SELECT ed.subject_id AS ent_id FROM edge ed
+              WHERE ed.subject_id::text = ANY(:ids) AND ({edge_acl.text})
+              UNION
+              SELECT ed.object_id AS ent_id FROM edge ed
+              WHERE ed.object_id::text = ANY(:ids) AND ({edge_acl.text})
+            ) AS v
+            """
+        ),
+        params,
+    )
+    return {r["id"] for r in rows.mappings()}

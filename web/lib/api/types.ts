@@ -341,3 +341,60 @@ export interface OntologyProposal {
     high_stakes: boolean;
   }>;
 }
+
+// ---------------------------------------------------------------------------
+// Integrations — Google Docs (v1)
+// ---------------------------------------------------------------------------
+
+export interface GoogleDriveConnectionSummary {
+  id: UUID;
+  workspace_id: UUID;
+  user_id: UUID;
+  account_email: string;
+  scopes: string[];
+  selection: {
+    folders: Array<{ id: string; name: string }>;
+    files: Array<{ id: string; name: string }>;
+  };
+  created_at: ISO;
+  updated_at: ISO;
+  revoked_at: ISO | null;
+}
+
+export interface DriveTreeNode {
+  id: string;
+  name: string;
+  mime_type: string;
+  is_folder: boolean;
+  is_doc: boolean;
+}
+
+export interface DriveTree {
+  parent: string;
+  children: DriveTreeNode[];
+}
+
+export interface GoogleDocsSyncJob {
+  id: UUID;
+  workspace_id: UUID;
+  connection_id: UUID;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  total_docs: number;
+  processed_docs: number;
+  failed_docs: number;
+  skipped_docs: number;
+  error: string | null;
+  created_at: ISO;
+  started_at: ISO | null;
+  completed_at: ISO | null;
+}
+
+export interface GoogleDocSyncState {
+  id: UUID;
+  google_doc_id: string;
+  doc_title: string | null;
+  status: "pending" | "syncing" | "completed" | "failed" | "skipped";
+  error: string | null;
+  episode_id: UUID | null;
+  last_synced_at: ISO | null;
+}

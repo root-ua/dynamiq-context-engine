@@ -26,6 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.acl import edge_visibility_clause
+from app.auth.external_acl import resolve_user_identities
 from app.auth.jwt import Principal
 from app.core.logging import get_logger
 from app.domain import ontology as ontology_mod
@@ -441,7 +442,8 @@ async def invalidate(
 # Reads
 # ---------------------------------------------------------------------------
 
-def _apply_acl(
+async def _apply_acl(
+    session: AsyncSession,
     conditions: list[str],
     params: dict[str, Any],
     principal: Principal | None,
@@ -449,13 +451,18 @@ def _apply_acl(
     """In-place: AND the per-source visibility clause into the WHERE.
 
     Pass ``principal=None`` to skip ACL filtering (legacy callers,
-    background jobs, internal pipeline reads). Service-kind and
-    admin/owner principals also short-circuit to TRUE inside
-    ``edge_visibility_clause``.
+    background jobs, internal pipeline reads). Service-kind principals
+    also short-circuit to TRUE inside ``edge_visibility_clause``.
+    User principals trigger a one-shot identity lookup against
+    ``user_external_identity`` so the predicate can intersect Drive
+    ACL rows.
     """
     if principal is None:
         return
-    clause = edge_visibility_clause(principal, edge_alias="e")
+    identities = await resolve_user_identities(session, principal)
+    clause = edge_visibility_clause(
+        principal, edge_alias="e", identities=identities
+    )
     conditions.append(clause.text)
     for key, value in clause._bindparams.items():
         params[key] = value.value
@@ -466,7 +473,7 @@ async def get(
 ) -> Edge | None:
     conditions = ["e.id = :id"]
     params: dict[str, Any] = {"id": edge_id}
-    _apply_acl(conditions, params, principal)
+    await _apply_acl(session, conditions, params, principal)
     result = await session.execute(
         text(_EDGE_SELECT + f" WHERE {' AND '.join(conditions)}"),
         params,
@@ -508,7 +515,7 @@ async def live_edges(
         conditions.append("e.predicate_id = :predicate_id")
         params["predicate_id"] = relation.id
 
-    _apply_acl(conditions, params, principal)
+    await _apply_acl(session, conditions, params, principal)
 
     sql = _EDGE_SELECT + f" WHERE {' AND '.join(conditions)} ORDER BY lower(e.valid_time) DESC LIMIT :limit"
     result = await session.execute(text(sql), params)
@@ -536,7 +543,7 @@ async def history(
         if not relation: return []
         conditions.append("e.predicate_id = :predicate_id"); params["predicate_id"] = relation.id
 
-    _apply_acl(conditions, params, principal)
+    await _apply_acl(session, conditions, params, principal)
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     sql = _EDGE_SELECT + f" {where} ORDER BY lower(e.sys_time) DESC, lower(e.valid_time) DESC LIMIT :limit"
@@ -578,7 +585,7 @@ async def as_of(
         if not relation: return []
         conditions.append("e.predicate_id = :predicate_id"); params["predicate_id"] = relation.id
 
-    _apply_acl(conditions, params, principal)
+    await _apply_acl(session, conditions, params, principal)
 
     sql = _EDGE_SELECT + f" WHERE {' AND '.join(conditions)} ORDER BY lower(e.valid_time) DESC LIMIT :limit"
     result = await session.execute(text(sql), params)

@@ -61,6 +61,10 @@ export default function SettingsPage() {
   const [deleteWsSlug, setDeleteWsSlug] = useState("");
   const [deletingWs, setDeletingWs] = useState(false);
 
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetSlug, setResetSlug] = useState("");
+  const [resetting, setResetting] = useState(false);
+
   const [deleteAcctOpen, setDeleteAcctOpen] = useState(false);
   const [deleteAcctConfirm, setDeleteAcctConfirm] = useState("");
   const [deletingAcct, setDeletingAcct] = useState(false);
@@ -85,6 +89,33 @@ export default function SettingsPage() {
       });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function resetWorkspace() {
+    if (!workspace) return;
+    setResetting(true);
+    try {
+      const counts = await workspacesApi.debugReset(workspace.id, resetSlug);
+      const total = Object.values(counts).reduce(
+        (sum, n) => sum + (n > 0 ? n : 0),
+        0,
+      );
+      push({
+        title: "Workspace reset",
+        description: `Deleted ${total} rows across ${Object.keys(counts).length} tables. You can re-sync Google Docs now.`,
+      });
+      void qc.invalidateQueries();
+      setResetOpen(false);
+      setResetSlug("");
+    } catch (err) {
+      push({
+        title: "Couldn't reset workspace",
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -363,6 +394,9 @@ export default function SettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+          <Button variant="outline" onClick={() => setResetOpen(true)}>
+            Reset memory (debug)
+          </Button>
           <Button variant="destructive" onClick={() => setDeleteWsOpen(true)}>
             Delete workspace
           </Button>
@@ -371,6 +405,48 @@ export default function SettingsPage() {
           </Button>
         </CardContent>
       </Card>
+
+      <Dialog open={resetOpen} onOpenChange={setResetOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reset workspace memory</DialogTitle>
+            <DialogDescription>
+              Wipes the graph, episodes, and ontology in{" "}
+              <strong>{workspace.name}</strong>. Keeps the workspace, members,
+              OAuth connections, sensitivity labels, and audit log. After this,
+              re-clicking <em>Sync now</em> on Google Docs re-ingests every doc
+              from scratch. No undo.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="reset-confirm">
+              Type the workspace slug{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                {workspace.slug}
+              </code>{" "}
+              to confirm:
+            </Label>
+            <Input
+              id="reset-confirm"
+              value={resetSlug}
+              onChange={(e) => setResetSlug(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setResetOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={resetWorkspace}
+              disabled={resetSlug !== workspace.slug || resetting}
+            >
+              {resetting ? "Resetting…" : "Reset memory"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={deleteWsOpen} onOpenChange={setDeleteWsOpen}>
         <DialogContent>

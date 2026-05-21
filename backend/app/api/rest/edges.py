@@ -31,13 +31,30 @@ async def time_bounds(
     """
     if not principal.workspace_id:
         raise HTTPException(400, "workspace required")
+    # The slider's range needs to span the earliest fact start to at
+    # least "now" — and ideally further if the workspace has future-dated
+    # facts (e.g. "Beacon MVP ships 2026-08-15" creates an edge with
+    # valid_from in the future).
+    #
+    # CRITICAL: upper(valid_time) is 'infinity'::timestamptz for open-ended
+    # facts (most of them). MAX over a column containing infinity yields
+    # infinity, which the frontend can't parse as a date. Strip infinity
+    # to NULL before the MAX with a CASE WHEN.
     result = await session.execute(
         text(
             """
             SELECT
               MIN(lower(valid_time))::text AS min_valid_from,
-              MAX(COALESCE(upper(valid_time), now()))::text AS max_valid_from
+              GREATEST(
+                MAX(CASE
+                  WHEN upper(valid_time) = 'infinity'::timestamptz THEN NULL
+                  ELSE upper(valid_time)
+                END),
+                MAX(lower(valid_time)),
+                now()
+              )::text AS max_valid_from
             FROM edge
+            WHERE upper(sys_time) = 'infinity'::timestamptz
             """
         ),
     )

@@ -162,9 +162,17 @@ CurrentPrincipal = Annotated[Principal, Depends(current_principal)]
 
 
 async def db_session(principal: CurrentPrincipal) -> AsyncIterator[AsyncSession]:
+    # Service principals (agent tokens marked `service`, internal callers)
+    # bypass the source ACL filter and rely on workspace RLS only.
+    # User principals get their email threaded into the session GUCs so the
+    # Postgres-side RLS policies enforce per-fact visibility — see
+    # migration 20260521_0001 (external_acl_rls).
+    bypass = principal.kind == "service"
     async with session_scope(
         workspace_id=principal.workspace_id,
         user_id=principal.user_id,
+        user_email=None if bypass else principal.email,
+        bypass_external_acl=bypass,
     ) as session:
         yield session
 

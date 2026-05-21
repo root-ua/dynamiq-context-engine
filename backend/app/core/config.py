@@ -71,6 +71,20 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
 
+    # --- Google Docs integration (optional; whole feature is disabled
+    # when GOOGLE_CLIENT_ID is unset). UI hides the "Connect Google"
+    # button automatically in that case. ---
+    google_client_id: str | None = Field(None, alias="GOOGLE_CLIENT_ID")
+    google_client_secret: str | None = Field(None, alias="GOOGLE_CLIENT_SECRET")
+    google_redirect_uri: str | None = Field(None, alias="GOOGLE_REDIRECT_URI")
+
+    # Fernet key (32-byte url-safe base64) used to encrypt OAuth tokens
+    # at rest in `google_drive_connection`. Mint with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    integration_token_encryption_key: str | None = Field(
+        None, alias="INTEGRATION_TOKEN_ENCRYPTION_KEY"
+    )
+
     contradictor_similarity_threshold: float = Field(0.85, alias="CONTRADICTOR_SIMILARITY_THRESHOLD")
     hybrid_rrf_k: int = Field(60, alias="HYBRID_RRF_K")
     search_default_limit: int = Field(20, alias="SEARCH_DEFAULT_LIMIT")
@@ -117,7 +131,7 @@ class Settings(BaseSettings):
 
     # Playground (chat-style demo UI driving real Claude over our MCP).
     playground_model: str = Field(
-        "claude-sonnet-4-6", alias="PLAYGROUND_MODEL"
+        "claude-haiku-4-5", alias="PLAYGROUND_MODEL"
     )
 
     # In-memory rate limit on /api/mcp/* calls authenticated by an agent

@@ -559,7 +559,7 @@ export default function PlaygroundPage() {
         {/* Chat pane */}
         <section
           className={cn(
-            "flex min-h-0 flex-col border-r",
+            "flex min-h-0 min-w-0 flex-col border-r",
             paneTab === "chat" ? "" : "hidden md:flex",
           )}
           onDragOver={(e) => {
@@ -818,7 +818,7 @@ export default function PlaygroundPage() {
         {/* Trace pane */}
         <section
           className={cn(
-            "flex min-h-0 flex-col",
+            "flex min-h-0 min-w-0 flex-col",
             paneTab === "trace" ? "" : "hidden md:flex",
           )}
         >

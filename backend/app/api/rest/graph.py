@@ -3,13 +3,13 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.content_negotiation import accept_jsonld
 from app.api.rest.schemas import GraphEdgeOut, GraphNodeOut, GraphOut, GraphTraverseIn
 from app.auth.deps import CurrentPrincipal, DbSession
 from app.jsonld import BASE_CONTEXT, edge_iri, entity_iri, relation_iri
-from app.retrieval.graph import traverse
+from app.retrieval.graph import traverse, whole_graph
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
@@ -66,6 +66,41 @@ async def traverse_route(
             )
         doc["@graph"] = graph
         return doc
+    return GraphOut(
+        nodes=[GraphNodeOut(**asdict(n)) for n in sub.nodes],
+        edges=[GraphEdgeOut(**asdict(e)) for e in sub.edges],
+    )
+
+
+@router.get("/all", response_model=GraphOut)
+async def whole_graph_route(
+    principal: CurrentPrincipal,
+    session: DbSession,
+    max_nodes: int = Query(default=500, ge=1, le=2000),
+    types: list[str] | None = Query(default=None),
+    predicates: list[str] | None = Query(default=None),
+    as_of_valid: str | None = Query(default=None),
+) -> GraphOut:
+    """Return every entity + every live edge in the workspace, capped.
+
+    Powers the "Show whole graph" affordance on the graph page — no seed
+    required. Capped at ``max_nodes`` so large workspaces don't OOM the
+    browser. Ordering is newest-first so truncation surfaces recent work.
+
+    Optional filter params mirror those of the seed-based traversal so the
+    same filter UI sidebar works in both modes.
+    """
+    if not principal.workspace_id:
+        raise HTTPException(400, "workspace required")
+    sub = await whole_graph(
+        session,
+        workspace_id=principal.workspace_id,
+        max_nodes=max_nodes,
+        principal=principal,
+        type_slugs=types,
+        predicate_slugs=predicates,
+        as_of_valid=as_of_valid,
+    )
     return GraphOut(
         nodes=[GraphNodeOut(**asdict(n)) for n in sub.nodes],
         edges=[GraphEdgeOut(**asdict(e)) for e in sub.edges],

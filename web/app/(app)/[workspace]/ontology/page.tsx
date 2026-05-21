@@ -3,6 +3,7 @@ import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   PiStack as Layers,
+  PiList as List,
   PiGraph as Network,
   PiPlus as Plus,
   PiTag as TagIcon,
@@ -11,6 +12,7 @@ import {
 
 import { LabelManager } from "@/components/labels/LabelManager";
 import { LabelPolicyEditor } from "@/components/labels/LabelPolicyEditor";
+import type { EntityType, RelationType } from "@/lib/api/types";
 import { RelationCreateDialog } from "@/components/ontology/RelationCreateDialog";
 import { RelationEditor } from "@/components/ontology/RelationEditor";
 import { RelationList } from "@/components/ontology/RelationList";
@@ -105,9 +107,13 @@ export default function OntologyPage() {
         </div>
       </header>
 
-      <Tabs defaultValue="types" className="flex min-h-0 flex-1 flex-col">
+      <Tabs defaultValue="overview" className="flex min-h-0 flex-1 flex-col">
         <div className="flex items-center justify-between">
           <TabsList>
+            <TabsTrigger value="overview">
+              <List className="mr-1.5 h-3.5 w-3.5" />
+              Overview
+            </TabsTrigger>
             <TabsTrigger value="types">
               <Layers className="mr-1.5 h-3.5 w-3.5" />
               Entity types
@@ -128,6 +134,13 @@ export default function OntologyPage() {
             </TabsTrigger>
           </TabsList>
         </div>
+
+        <TabsContent
+          value="overview"
+          className="mt-4 flex min-h-0 flex-1 flex-col gap-4 overflow-auto"
+        >
+          <OntologyOverview types={types} relations={relations} />
+        </TabsContent>
 
         <TabsContent
           value="types"
@@ -293,6 +306,184 @@ function BuiltinBanner({
           <Plus className="h-3.5 w-3.5" /> New
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Compact "at-a-glance" view of the workspace ontology.
+ *
+ * Two side-by-side lists: every entity type (with parent + system badge)
+ * and every relation (with domain → range + flags). No editing here — the
+ * Types/Relations tabs handle that. This tab is purely "show me everything
+ * in one screen so I understand the schema."
+ */
+function OntologyOverview({
+  types,
+  relations,
+}: {
+  types: EntityType[];
+  relations: RelationType[];
+}) {
+  const typeById = React.useMemo(() => {
+    const m = new Map<string, EntityType>();
+    for (const t of types) m.set(t.id, t);
+    return m;
+  }, [types]);
+
+  // Stable sort: system first, then alphabetical by name.
+  const sortedTypes = React.useMemo(
+    () =>
+      [...types].sort((a, b) => {
+        if (a.system !== b.system) return a.system ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      }),
+    [types],
+  );
+  const sortedRelations = React.useMemo(
+    () =>
+      [...relations].sort((a, b) => {
+        if (a.system !== b.system) return a.system ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      }),
+    [relations],
+  );
+
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      {/* Types */}
+      <Card className="flex flex-col overflow-hidden">
+        <div className="border-b p-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold">Entity types</div>
+            <span className="text-xs text-muted-foreground">
+              {types.length} total · {types.filter((t) => !t.system).length}{" "}
+              custom
+            </span>
+          </div>
+        </div>
+        {sortedTypes.length === 0 ? (
+          <EmptyState
+            icon={Layers}
+            title="No entity types yet"
+            description="Switch to the Entity types tab to create one."
+          />
+        ) : (
+          <ul className="divide-y text-sm">
+            {sortedTypes.map((t) => {
+              const parent = t.extends_id ? typeById.get(t.extends_id) : null;
+              return (
+                <li key={t.id} className="flex items-start gap-2 px-3 py-2">
+                  <Layers className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{t.name}</span>
+                      <code className="text-[10px] text-muted-foreground">
+                        {t.slug}
+                      </code>
+                      {parent && (
+                        <span className="text-[10px] text-muted-foreground">
+                          extends <code>{parent.slug}</code>
+                        </span>
+                      )}
+                      {t.system && (
+                        <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          built-in
+                        </span>
+                      )}
+                    </div>
+                    {t.description && (
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {t.description}
+                      </p>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </Card>
+
+      {/* Relations */}
+      <Card className="flex flex-col overflow-hidden">
+        <div className="border-b p-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold">Relations</div>
+            <span className="text-xs text-muted-foreground">
+              {relations.length} total ·{" "}
+              {relations.filter((r) => !r.system).length} custom
+            </span>
+          </div>
+        </div>
+        {sortedRelations.length === 0 ? (
+          <EmptyState
+            icon={Network}
+            title="No relations yet"
+            description="Switch to the Relations tab to create one."
+          />
+        ) : (
+          <ul className="divide-y text-sm">
+            {sortedRelations.map((r) => {
+              const domain = r.domain_type_id
+                ? typeById.get(r.domain_type_id)
+                : null;
+              const range = r.range_type_id
+                ? typeById.get(r.range_type_id)
+                : null;
+              return (
+                <li key={r.id} className="flex items-start gap-2 px-3 py-2">
+                  <Network className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{r.name}</span>
+                      <code className="text-[10px] text-muted-foreground">
+                        {r.slug}
+                      </code>
+                      {(domain || range) && (
+                        <span className="text-[10px] text-muted-foreground">
+                          <code>{domain?.slug ?? "?"}</code>
+                          {" → "}
+                          <code>{range?.slug ?? "?"}</code>
+                        </span>
+                      )}
+                      {r.system && (
+                        <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          built-in
+                        </span>
+                      )}
+                      {r.high_stakes && (
+                        <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
+                          high-stakes
+                        </span>
+                      )}
+                      {r.symmetric && (
+                        <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          symmetric
+                        </span>
+                      )}
+                      {r.transitive && (
+                        <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          transitive
+                        </span>
+                      )}
+                    </div>
+                    {r.description && (
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {r.description}
+                      </p>
+                    )}
+                    <div className="mt-0.5 text-[10px] text-muted-foreground">
+                      cardinality {r.cardinality_subject} →{" "}
+                      {r.cardinality_object}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </Card>
     </div>
   );
 }

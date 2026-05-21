@@ -171,6 +171,7 @@ from app.workers.export import (  # noqa: E402
     run_user_export,
     run_workspace_export,
 )
+from app.integrations.google.sync import sync_google_docs  # noqa: E402
 
 
 class WorkerSettings:
@@ -180,6 +181,7 @@ class WorkerSettings:
         run_workspace_export,
         run_user_export,
         purge_old_audit_log,
+        sync_google_docs,
     ]
     cron_jobs = [
         # 03:17 UTC daily; off-peak.

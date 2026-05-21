@@ -519,8 +519,8 @@ async def _propose_ontology(session: AsyncSession, workspace_id: str, actor_id: 
     return out
 
 
-async def _get_provenance(session: AsyncSession, workspace_id: str, actor_id: str | None, p: GetProvenanceIn) -> dict[str, Any]:
-    doc = await prov_mod.get_edge_provenance(session, p.fact_id)
+async def _get_provenance(session: AsyncSession, workspace_id: str, actor_id: str | None, p: GetProvenanceIn, principal: Principal) -> dict[str, Any]:
+    doc = await prov_mod.get_edge_provenance(session, p.fact_id, principal=principal)
     if not doc:
         return {"error": "fact not found"}
     return doc
@@ -612,7 +612,9 @@ async def _shape_fact(
         session, target_kind="edge", target_id=edge.id
     )
     label_slugs = [row.slug for row in label_rows]
-    provenance = await prov_mod.get_edge_provenance(session, edge.id)
+    provenance = await prov_mod.get_edge_provenance(
+        session, edge.id, principal=principal
+    )
     # Freshness in days from now; for an open-ended edge use the
     # ``valid_from`` lower bound.
     try:

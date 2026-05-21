@@ -12,6 +12,8 @@ from app.api.rest import (
     exports,
     graph,
     health,
+    integrations_google_docs,
+    integrations_permissions,
     labels,
     me,
     members,
@@ -44,3 +46,5 @@ router.include_router(actions.router)
 router.include_router(exports.router)
 router.include_router(agent_tokens.router)
 router.include_router(playground.router)
+router.include_router(integrations_google_docs.router)
+router.include_router(integrations_permissions.router)

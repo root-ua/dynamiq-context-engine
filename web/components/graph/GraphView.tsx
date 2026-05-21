@@ -88,21 +88,48 @@ export interface GraphViewProps {
   className?: string;
 }
 
-const FA2_SETTINGS = {
-  gravity: 1,
-  scalingRatio: 10,
-  slowDown: 10,
-  adjustSizes: true,
-  barnesHutOptimize: true,
-  strongGravityMode: false,
-  linLogMode: false,
-};
+// FA2 settings scale with node count: larger graphs need more repulsion
+// (higher scalingRatio) and less central gravity to avoid clumping.
+function fa2SettingsFor(nodeCount: number) {
+  if (nodeCount > 150) {
+    return {
+      gravity: 0.4,
+      scalingRatio: 40,
+      slowDown: 6,
+      adjustSizes: true,
+      barnesHutOptimize: true,
+      strongGravityMode: false,
+      linLogMode: true,
+    };
+  }
+  if (nodeCount > 60) {
+    return {
+      gravity: 0.7,
+      scalingRatio: 20,
+      slowDown: 8,
+      adjustSizes: true,
+      barnesHutOptimize: true,
+      strongGravityMode: false,
+      linLogMode: false,
+    };
+  }
+  return {
+    gravity: 1,
+    scalingRatio: 10,
+    slowDown: 10,
+    adjustSizes: true,
+    barnesHutOptimize: true,
+    strongGravityMode: false,
+    linLogMode: false,
+  };
+}
 
-// 40 iterations stabilises the layout visually for graphs up to ~200 nodes
-// (our typical workspace scale) without the ~1s wall-clock of the previous
-// 100-iteration run. If future workspaces push past that, expose a
-// "Refine layout" button that runs another pass on demand.
-const FA2_ITERATIONS = 40;
+// Iteration / worker-runtime scales with node count too.
+function fa2BudgetFor(nodeCount: number) {
+  if (nodeCount > 150) return { iterations: 120, workerMs: 6000 };
+  if (nodeCount > 60) return { iterations: 80, workerMs: 4000 };
+  return { iterations: 40, workerMs: 2500 };
+}
 
 /**
  * Sigma + graphology + ForceAtlas2 canvas. Rebuilds its graph whenever the
@@ -216,9 +243,13 @@ export function GraphView({
       const WorkerCtor = await loadWorkerLayout();
       if (cancelled) return;
 
+      const nodeCount = payload.nodes.length;
+      const settings = fa2SettingsFor(nodeCount);
+      const budget = fa2BudgetFor(nodeCount);
+
       if (WorkerCtor) {
         try {
-          const worker = new WorkerCtor(graph, { settings: FA2_SETTINGS });
+          const worker = new WorkerCtor(graph, { settings });
           mountedWorker = worker;
           worker.start();
           workerStopTimer = window.setTimeout(() => {
@@ -227,17 +258,17 @@ export function GraphView({
             } catch {
               /* worker may already be stopped */
             }
-          }, 2500);
+          }, budget.workerMs);
         } catch {
           forceAtlas2.assign(graph, {
-            iterations: FA2_ITERATIONS,
-            settings: FA2_SETTINGS,
+            iterations: budget.iterations,
+            settings,
           });
         }
       } else {
         forceAtlas2.assign(graph, {
-          iterations: FA2_ITERATIONS,
-          settings: FA2_SETTINGS,
+          iterations: budget.iterations,
+          settings,
         });
       }
     })();
@@ -295,17 +326,28 @@ function buildGraph(
   const graph = new MultiDirectedGraph();
   const seedSet = new Set(seeds);
 
-  // Seed a circular initial layout — FA2 spreads from here, but Sigma also
-  // draws the first frame before the worker has produced any positions.
+  // Seed initial positions. For seed-rooted traversal the radius grows with
+  // hop distance, giving FA2 a natural shell pattern. For whole-graph mode
+  // (no seeds, every node distance=0) that collapses into one tiny ring,
+  // so we spread by index across a wider disc and add jitter so FA2 has
+  // distinct positions to push apart.
   const n = payload.nodes.length || 1;
+  const wholeGraphMode = seedSet.size === 0;
+  const baseRadius = wholeGraphMode ? Math.max(30, Math.sqrt(n) * 8) : 10;
   payload.nodes.forEach((node, i) => {
     const angle = (i / n) * Math.PI * 2;
-    const radius = 10 + (node.distance ?? 0) * 6;
+    const radius =
+      baseRadius +
+      (node.distance ?? 0) * 6 +
+      (wholeGraphMode ? (i % 7) * 2 : 0);
     const isSeed = seedSet.has(node.id);
+    const jitter = wholeGraphMode
+      ? { x: Math.sin(i * 12.9898) * 4, y: Math.cos(i * 78.233) * 4 }
+      : { x: isSeed ? 0 : 0.01 * i, y: 0 };
     graph.addNode(node.id, {
       label: node.canonical,
-      x: Math.cos(angle) * radius + (isSeed ? 0 : 0.01 * i),
-      y: Math.sin(angle) * radius,
+      x: Math.cos(angle) * radius + jitter.x,
+      y: Math.sin(angle) * radius + jitter.y,
       size: isSeed ? 10 : Math.max(4, 8 - (node.distance ?? 0)),
       color: colorForType(node.type || "unknown", palette.mode),
       nodeType: node.type,
